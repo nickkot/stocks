@@ -132,16 +132,19 @@ export default function Page() {
     return { total, otmPass, oiPass, quotePass, minOTMActual, maxOTMActual };
   }, [chain, minOTM, maxOTM, minOI]);
 
-  // Decorate each row with derived metrics: T (years), IV, breakeven, multiple to 100x, P(reach strike), implied move.
+  // Sort selector for the candidates table.
+  type SortKey = "leverageAtPlus100" | "leverageAtPlus50" | "moveToTarget" | "probTarget" | "cheapest" | "strike";
+  const [sortKey, setSortKey] = useState<SortKey>("leverageAtPlus100");
+
+  // Decorate each row with derived metrics.
   const rows = useMemo(() => {
     if (!chain) return [];
     const now = Date.now() / 1000;
-    // Approximate leveraged-ETF dynamics under user's underlying assumptions.
     const muLev = leverage * muAnnual
       - (expenseRatio + financingSpread * (leverage - 1))
       - 0.5 * leverage * (leverage - 1) * sigmaAnnual * sigmaAnnual;
     const sigmaLev = leverage * sigmaAnnual;
-    return filteredCalls.map(c => {
+    const decorated = filteredCalls.map(c => {
       const T = Math.max(1 / 365, (c.expiration - now) / (365 * 86400));
       const iv = c.impliedVolatility && c.impliedVolatility > 0
         ? c.impliedVolatility
@@ -151,9 +154,31 @@ export default function Page() {
       const moveToTarget = priceForTarget / chain.spot - 1;
       const probReachStrike = probSTAboveK(chain.spot, c.strike, T, muLev, sigmaLev);
       const probReachTarget = probSTAboveK(chain.spot, priceForTarget, T, muLev, sigmaLev);
-      return { ...c, T, iv, breakeven, priceForTarget, moveToTarget, probReachStrike, probReachTarget };
+      // Leverage = payoff multiple at expiry given a fixed move in the leveraged ETF (intrinsic only).
+      const payoffMult = (movePct: number) => {
+        const finalPrice = chain.spot * (1 + movePct);
+        const intrinsic = Math.max(0, finalPrice - c.strike);
+        return c.mid > 0 ? intrinsic / c.mid : 0;
+      };
+      const leverageAtPlus50 = payoffMult(0.5);
+      const leverageAtPlus100 = payoffMult(1.0);
+      const leverageAtPlus200 = payoffMult(2.0);
+      return {
+        ...c, T, iv, breakeven, priceForTarget, moveToTarget,
+        probReachStrike, probReachTarget,
+        leverageAtPlus50, leverageAtPlus100, leverageAtPlus200,
+      };
     });
-  }, [filteredCalls, chain, riskFreeRate, targetMultiple, muAnnual, sigmaAnnual, leverage, expenseRatio, financingSpread]);
+    const cmp: Record<SortKey, (a: any, b: any) => number> = {
+      leverageAtPlus100: (a, b) => b.leverageAtPlus100 - a.leverageAtPlus100,
+      leverageAtPlus50:  (a, b) => b.leverageAtPlus50  - a.leverageAtPlus50,
+      moveToTarget:      (a, b) => a.moveToTarget      - b.moveToTarget,
+      probTarget:        (a, b) => b.probReachTarget   - a.probReachTarget,
+      cheapest:          (a, b) => a.mid               - b.mid,
+      strike:            (a, b) => a.strike            - b.strike,
+    };
+    return decorated.sort(cmp[sortKey]);
+  }, [filteredCalls, chain, riskFreeRate, targetMultiple, muAnnual, sigmaAnnual, leverage, expenseRatio, financingSpread, sortKey]);
 
   async function runSim() {
     setSimRunning(true);
@@ -304,6 +329,21 @@ export default function Page() {
 
       <div className="panel" style={{ marginBottom: 16 }}>
         <h2>Far-OTM call candidates {expDate ? `· ${dateStr(expDate)}` : ""}</h2>
+        {chain && rows.length > 0 && (
+          <div className="row" style={{ marginBottom: 10 }}>
+            <div className="field" style={{ minWidth: 240 }}>
+              <label>Sort by</label>
+              <select value={sortKey} onChange={e => setSortKey(e.target.value as any)}>
+                <option value="leverageAtPlus100">Highest leverage if {symbol} doubles (+100%)</option>
+                <option value="leverageAtPlus50">Highest leverage if {symbol} +50%</option>
+                <option value="probTarget">Highest P(hit {targetMultiple}x)</option>
+                <option value="moveToTarget">Smallest move needed for {targetMultiple}x</option>
+                <option value="cheapest">Cheapest premium</option>
+                <option value="strike">Strike (low → high)</option>
+              </select>
+            </div>
+          </div>
+        )}
         {loading && <div className="muted">Loading chain…</div>}
         {err && <div className="bad">Error: {err}</div>}
         {!loading && !err && !chain && (
@@ -329,11 +369,12 @@ export default function Page() {
                   <th>Bid/Ask</th>
                   <th>IV</th>
                   <th>OI</th>
-                  <th>Vol</th>
+                  <th title="Payoff multiple at expiry if the leveraged ETF moves +50%">Mult @+50%</th>
+                  <th title="Payoff multiple at expiry if the leveraged ETF doubles (+100%)">Mult @+100%</th>
+                  <th title="Payoff multiple at expiry if the leveraged ETF triples (+200%)">Mult @+200%</th>
                   <th>Breakeven</th>
-                  <th>Need for {targetMultiple}x</th>
-                  <th>Move to {targetMultiple}x</th>
-                  <th>P(reach strike)</th>
+                  <th title={`Leveraged-ETF price at expiry needed to make this contract worth ${targetMultiple}x its premium`}>Price for {targetMultiple}x</th>
+                  <th title={`Percent move in the leveraged ETF from today's spot needed to hit ${targetMultiple}x`}>Move to {targetMultiple}x</th>
                   <th>P(hit {targetMultiple}x)</th>
                 </tr>
               </thead>
@@ -346,17 +387,31 @@ export default function Page() {
                     <td className="muted">{fmt(r.bid)} / {fmt(r.ask)}</td>
                     <td>{pct(r.iv)}</td>
                     <td>{r.openInterest}</td>
-                    <td>{r.volume}</td>
+                    <td className={r.leverageAtPlus50  >= 1 ? "good" : "muted"}>{fmt(r.leverageAtPlus50)}x</td>
+                    <td className={r.leverageAtPlus100 >= 5 ? "good" : "muted"}>{fmt(r.leverageAtPlus100)}x</td>
+                    <td className={r.leverageAtPlus200 >= 20 ? "good" : "muted"}>{fmt(r.leverageAtPlus200)}x</td>
                     <td>{usd(r.breakeven)}</td>
                     <td>{usd(r.priceForTarget)}</td>
                     <td className={r.moveToTarget > 5 ? "warn" : "good"}>{pct(r.moveToTarget)}</td>
-                    <td>{pct(r.probReachStrike)}</td>
                     <td className={r.probReachTarget > 0.01 ? "good" : "muted"}>{pct(r.probReachTarget, 2)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+        )}
+        {chain && rows.length > 0 && (
+          <details style={{ marginTop: 12, color: "var(--muted)", fontSize: 12, lineHeight: 1.6 }}>
+            <summary style={{ cursor: "pointer", color: "var(--text)" }}>What do these columns mean?</summary>
+            <div style={{ marginTop: 8 }}>
+              <strong>Mult @+50% / +100% / +200%</strong> — payoff multiple at expiry if {symbol} ends +50/100/200% from today. Computed as <code>max(0, spot·(1+move) − strike) / premium</code>. This is the leverage you actually get for a given move. Sort by these to find the most-leveraged contract for your scenario.<br/>
+              <strong>Breakeven</strong> — strike + premium. If {symbol} is exactly here at expiry, you get back what you paid.<br/>
+              <strong>Price for {targetMultiple}x</strong> — the {symbol} price at expiry that makes this contract worth <code>{targetMultiple} × premium</code>. Formula: <code>strike + {targetMultiple} × premium</code>.<br/>
+              <strong>Move to {targetMultiple}x</strong> — that price expressed as a percent move from today's spot.<br/>
+              <strong>P(hit {targetMultiple}x)</strong> — closed-form probability the contract reaches {targetMultiple}x at expiry, under your assumed underlying drift μ and vol σ with leveraged-ETF volatility decay applied. Click a row for a full Monte Carlo.<br/>
+              <em>Trade-off:</em> the most-leveraged contracts (highest Mult @+200%) are usually the deepest OTM with the lowest probability — that's the whole point. Sort by leverage to find the lottery tickets, then run the simulator on the most realistic ones.
+            </div>
+          </details>
         )}
       </div>
 
