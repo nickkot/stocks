@@ -61,6 +61,14 @@ export default function Page() {
   const [simResult, setSimResult] = useState<SimResult | null>(null);
   const [simRunning, setSimRunning] = useState(false);
 
+  // Manual mode (used when the data feed is unavailable, e.g. Yahoo blocking Vercel).
+  const [manualMode, setManualMode] = useState(false);
+  const [mSpot, setMSpot] = useState(25);
+  const [mStrike, setMStrike] = useState(50);
+  const [mPremium, setMPremium] = useState(0.10);
+  const [mIV, setMIV] = useState(0.85);
+  const [mDays, setMDays] = useState(180);
+
   const ticker = LEVERAGED_TICKERS.find(t => t.symbol === symbol);
   const leverage = ticker?.leverage ?? 3;
 
@@ -132,25 +140,31 @@ export default function Page() {
   }, [filteredCalls, chain, riskFreeRate, targetMultiple, muAnnual, sigmaAnnual, leverage, expenseRatio, financingSpread]);
 
   async function runSim() {
-    if (!selected || !chain) return;
     setSimRunning(true);
-    // Defer to next tick so UI can show "running"
     await new Promise(r => setTimeout(r, 30));
-    const days = Math.max(1, Math.round((selected.expiration - Date.now() / 1000) / 86400));
-    const iv = selected.impliedVolatility && selected.impliedVolatility > 0
-      ? selected.impliedVolatility
-      : impliedVolCall(selected.mid, chain.spot, selected.strike, days / 365, riskFreeRate);
+    const useManual = manualMode || !selected || !chain;
+    const spotPrice = useManual ? mSpot : chain!.spot;
+    const strike = useManual ? mStrike : selected!.strike;
+    const premium = useManual ? mPremium : selected!.mid;
+    const days = useManual
+      ? Math.max(1, mDays)
+      : Math.max(1, Math.round((selected!.expiration - Date.now() / 1000) / 86400));
+    const iv = useManual
+      ? mIV
+      : selected!.impliedVolatility && selected!.impliedVolatility > 0
+        ? selected!.impliedVolatility
+        : impliedVolCall(premium, spotPrice, strike, days / 365, riskFreeRate);
     const result = simulate({
-      spotUnderlying: chain.spot / leverage * leverage, // we model directly via leveraged compounding; underlying scale is irrelevant
+      spotUnderlying: spotPrice,
       muAnnual,
       sigmaAnnual,
       leverage,
       expenseRatio,
       financingSpread,
-      leveragedSpot: chain.spot,
-      strike: selected.strike,
+      leveragedSpot: spotPrice,
+      strike,
       daysToExpiry: days,
-      optionPrice: selected.mid,
+      optionPrice: premium,
       contracts,
       riskFreeRate,
       optionIV: iv,
@@ -177,6 +191,37 @@ export default function Page() {
         Educational tool, not financial advice. Far-OTM calls on 3x ETFs combine three forms of decay
         (theta on the option, expense + financing on the ETF, and volatility decay from daily rebalancing).
         Most paths to 100x require a sustained, low-vol upward drift in the underlying — not a slow grind.
+      </div>
+
+      {err && (
+        <div className="warningbox" style={{ marginBottom: 16, background: "#2a0a0a", borderColor: "#5a1a1a", color: "#fecaca" }}>
+          <strong>Live feed unavailable.</strong> {err}
+          <div style={{ marginTop: 6, color: "#fca5a5" }}>
+            Yahoo Finance blocks Vercel egress with HTTP 429. Two fixes: (1) set a free <code>TRADIER_TOKEN</code> env var
+            in Vercel (<a href="https://developer.tradier.com/user/sign_up" target="_blank" rel="noreferrer">developer.tradier.com</a>) then redeploy,
+            or (2) toggle <em>Manual mode</em> below and paste contract details from your broker.
+          </div>
+        </div>
+      )}
+
+      <div className="panel" style={{ marginBottom: 16 }}>
+        <h2>Mode</h2>
+        <div className="row">
+          <button className={!manualMode ? "" : "secondary"} onClick={() => setManualMode(false)}>Live feed</button>
+          <button className={manualMode ? "" : "secondary"} onClick={() => setManualMode(true)}>Manual entry</button>
+          <div className="muted" style={{ alignSelf: "center", fontSize: 12 }}>
+            Manual mode lets you simulate any contract by typing its details — no data feed needed.
+          </div>
+        </div>
+        {manualMode && (
+          <div className="row" style={{ marginTop: 12 }}>
+            <div className="field"><label>{symbol} spot ($)</label><input type="number" step="0.01" value={mSpot} onChange={e => setMSpot(Number(e.target.value))} /></div>
+            <div className="field"><label>Strike ($)</label><input type="number" step="0.5" value={mStrike} onChange={e => setMStrike(Number(e.target.value))} /></div>
+            <div className="field"><label>Premium ($)</label><input type="number" step="0.01" value={mPremium} onChange={e => setMPremium(Number(e.target.value))} /></div>
+            <div className="field"><label>IV (decimal)</label><input type="number" step="0.05" value={mIV} onChange={e => setMIV(Number(e.target.value))} /></div>
+            <div className="field"><label>Days to expiry</label><input type="number" value={mDays} onChange={e => setMDays(Number(e.target.value))} /></div>
+          </div>
+        )}
       </div>
 
       <div className="panel" style={{ marginBottom: 16 }}>
@@ -271,8 +316,18 @@ export default function Page() {
       <div className="grid cols-2" style={{ marginBottom: 16 }}>
         <div className="panel">
           <h2>Selected contract</h2>
-          {!selected && <div className="muted">Click a row to load it into the simulator.</div>}
-          {selected && chain && (
+          {manualMode ? (
+            <div className="grid cols-2" style={{ gap: 12 }}>
+              <div className="stat"><div className="v">Manual</div><div className="l">mode</div></div>
+              <div className="stat"><div className="v">{usd(mStrike)}</div><div className="l">strike</div></div>
+              <div className="stat"><div className="v">{usd(mPremium)}</div><div className="l">premium</div></div>
+              <div className="stat"><div className="v">{pct(mStrike / mSpot - 1)}</div><div className="l">% OTM</div></div>
+              <div className="stat"><div className="v">{pct(mIV)}</div><div className="l">implied vol</div></div>
+              <div className="stat"><div className="v">{mDays}d</div><div className="l">to expiry</div></div>
+            </div>
+          ) : !selected ? (
+            <div className="muted">Click a row to load it into the simulator.</div>
+          ) : chain && (
             <div className="grid cols-2" style={{ gap: 12 }}>
               <div className="stat"><div className="v">{selected.contractSymbol}</div><div className="l">contract</div></div>
               <div className="stat"><div className="v">{usd(selected.strike)}</div><div className="l">strike</div></div>
@@ -297,12 +352,12 @@ export default function Page() {
             <div className="field"><label>Target multiple</label><input type="number" value={targetMultiple} onChange={e => setTargetMultiple(Number(e.target.value))} /></div>
           </div>
           <div style={{ marginTop: 12 }}>
-            <button onClick={runSim} disabled={!selected || simRunning}>{simRunning ? "Simulating…" : `Run Monte Carlo (${paths.toLocaleString()} paths)`}</button>
+            <button onClick={runSim} disabled={(!manualMode && !selected) || simRunning}>{simRunning ? "Simulating…" : `Run Monte Carlo (${paths.toLocaleString()} paths)`}</button>
           </div>
         </div>
       </div>
 
-      {simResult && selected && chain && (
+      {simResult && (manualMode || (selected && chain)) && (
         <div className="panel" style={{ marginBottom: 16 }}>
           <h2>Simulation result</h2>
           <div className="grid cols-3" style={{ gap: 12 }}>
