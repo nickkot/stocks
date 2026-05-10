@@ -567,19 +567,19 @@ export default function Page() {
         <div className="panel" style={{ marginBottom: 16 }}>
           <h2>Simulation result</h2>
           <div className="grid cols-3" style={{ gap: 12 }}>
-            <div className="stat"><div className="v good">{pct(simResult.probTargetMultiple, 2)}</div><div className="l">P(reach {targetMultiple}x)</div></div>
-            <div className="stat"><div className="v">{pct(simResult.probTenX, 2)}</div><div className="l">P(reach 10x)</div></div>
-            <div className="stat"><div className="v">{pct(simResult.probDoubles, 2)}</div><div className="l">P(double)</div></div>
-            <div className="stat"><div className="v">{pct(simResult.probInTheMoney, 1)}</div><div className="l">P(ITM at expiry)</div></div>
-            <div className="stat"><div className="v">{usd(simResult.endingLeveragedPrice.p50)}</div><div className="l">{symbol} median at expiry</div></div>
-            <div className="stat"><div className="v">{usd(simResult.endingLeveragedPrice.p95)}</div><div className="l">{symbol} 95th pct</div></div>
-            <div className="stat"><div className="v">{fmt(simResult.payoffMultiple.mean)}x</div><div className="l">mean payoff multiple</div></div>
-            <div className="stat"><div className="v">{fmt(simResult.payoffMultiple.p95)}x</div><div className="l">95th pct payoff</div></div>
+            <div className="stat"><div className="v good">{pct(simResult.probPeakTarget, 2)}</div><div className="l">P(touch {targetMultiple}x anytime)</div></div>
+            <div className="stat"><div className="v">{pct(simResult.probPeakTenX, 2)}</div><div className="l">P(touch 10x anytime)</div></div>
+            <div className="stat"><div className="v">{pct(simResult.probPeakDoubles, 2)}</div><div className="l">P(touch 2x anytime)</div></div>
+            <div className="stat"><div className="v">{fmt(simResult.peakPayoffMultiple.p50)}x</div><div className="l">median peak multiple</div></div>
+            <div className="stat"><div className="v">{fmt(simResult.peakPayoffMultiple.p95)}x</div><div className="l">95th pct peak</div></div>
+            <div className="stat"><div className="v">{fmt(simResult.peakPayoffMultiple.mean)}x</div><div className="l">mean peak multiple</div></div>
+            <div className="stat muted"><div className="v">{pct(simResult.probTargetMultiple, 2)}</div><div className="l">P(end ≥ {targetMultiple}x at expiry)</div></div>
+            <div className="stat muted"><div className="v">{pct(simResult.probInTheMoney, 1)}</div><div className="l">P(ITM at expiry)</div></div>
             <div className="stat"><div className="v">{pct(simResult.leveragedMoveForTarget)}</div><div className="l">{symbol} move needed for {targetMultiple}x</div></div>
           </div>
 
           <div style={{ marginTop: 16 }}>
-            <h2>Distribution of payoff multiples</h2>
+            <h2>Distribution of peak payoff multiples <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>(highest mark reached on each path — sold at the optimal moment)</span></h2>
             {(() => {
               const totalCount = simResult.histogram.reduce((s, h) => s + h.count, 0) || 1;
               let cum = 0;
@@ -627,7 +627,7 @@ export default function Page() {
 
           <div className="warningbox" style={{ marginTop: 16 }}>
             Model: underlying GBM with drift μ and vol σ; leveraged ETF compounded daily as <code>L · r_under − (expense + financing·(L−1))/252</code>;
-            option payoff is intrinsic at expiry. Volatility decay emerges from the path. Try σ = 0.25 (S&P-like) vs 0.40 (semis-like) and see how the probability of 100x collapses with σ.
+            option mark each day = Black-Scholes value at remaining time and current ETF price, holding IV constant at the contract's IV. The "peak multiple" assumes you'd sell at the path's highest theoretical mark — an optimistic bound (you don't know the peak in real time) but the right metric for "could I have made N× at any point". Volatility decay emerges from the path.
           </div>
         </div>
       )}
