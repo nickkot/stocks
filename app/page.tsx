@@ -137,7 +137,7 @@ export default function Page() {
   }, [chain, minOTM, maxOTM, minOI]);
 
   // Sort selector for the candidates table.
-  type SortKey = "leverageAtPlus100" | "leverageAtPlus50" | "moveToTarget" | "probTarget" | "probTouch" | "cheapest" | "strike";
+  type SortKey = "leverageAtPlus100" | "leverageAtPlus50" | "moveToTarget" | "probTarget" | "probTouch" | "probTouch2" | "probTouch3" | "probTouch5" | "probTouch10" | "cheapest" | "strike";
   const [sortKey, setSortKey] = useState<SortKey>("leverageAtPlus100");
 
   // Decorate each row with derived metrics.
@@ -167,17 +167,25 @@ export default function Page() {
       const leverageAtPlus50 = payoffMult(0.5);
       const leverageAtPlus100 = payoffMult(1.0);
       const leverageAtPlus200 = payoffMult(2.0);
-      // Spot level needed today (at current IV/T) for the contract's mark to equal touchMultiple × premium.
+      // Spot level needed today (at current IV/T) for the contract's mark to equal N × premium.
       const ivForTouch = iv > 0 ? iv : 0.5;
-      const barrier = spotForCallPrice(touchMultiple * c.mid, c.strike, T, riskFreeRate, ivForTouch);
-      const probTouchMult = Number.isFinite(barrier) && barrier > 0
-        ? probTouchUpperBarrier(chain.spot, barrier, T, muLev, sigmaLev)
-        : 0;
+      const probTouchAt = (mult: number) => {
+        if (c.mid <= 0 || mult <= 1) return 0;
+        const B = spotForCallPrice(mult * c.mid, c.strike, T, riskFreeRate, ivForTouch);
+        return Number.isFinite(B) && B > 0
+          ? probTouchUpperBarrier(chain.spot, B, T, muLev, sigmaLev)
+          : 0;
+      };
+      const probTouchMult = probTouchAt(touchMultiple);
+      const probTouch2  = probTouchAt(2);
+      const probTouch3  = probTouchAt(3);
+      const probTouch5  = probTouchAt(5);
+      const probTouch10 = probTouchAt(10);
       return {
         ...c, T, iv, breakeven, priceForTarget, moveToTarget,
         probReachStrike, probReachTarget,
         leverageAtPlus50, leverageAtPlus100, leverageAtPlus200,
-        barrier, probTouchMult,
+        probTouchMult, probTouch2, probTouch3, probTouch5, probTouch10,
       };
     });
     const cmp: Record<SortKey, (a: any, b: any) => number> = {
@@ -186,6 +194,10 @@ export default function Page() {
       moveToTarget:      (a, b) => a.moveToTarget      - b.moveToTarget,
       probTarget:        (a, b) => b.probReachTarget   - a.probReachTarget,
       probTouch:         (a, b) => b.probTouchMult     - a.probTouchMult,
+      probTouch2:        (a, b) => b.probTouch2        - a.probTouch2,
+      probTouch3:        (a, b) => b.probTouch3        - a.probTouch3,
+      probTouch5:        (a, b) => b.probTouch5        - a.probTouch5,
+      probTouch10:       (a, b) => b.probTouch10       - a.probTouch10,
       cheapest:          (a, b) => a.mid               - b.mid,
       strike:            (a, b) => a.strike            - b.strike,
     };
@@ -364,6 +376,10 @@ export default function Page() {
             <div className="field" style={{ minWidth: 240 }}>
               <label>Sort by</label>
               <select value={sortKey} onChange={e => setSortKey(e.target.value as any)}>
+                <option value="probTouch2">Highest P(touch 2x anytime)</option>
+                <option value="probTouch3">Highest P(touch 3x anytime)</option>
+                <option value="probTouch5">Highest P(touch 5x anytime)</option>
+                <option value="probTouch10">Highest P(touch 10x anytime)</option>
                 <option value="probTouch">Highest P(touch {touchMultiple}x anytime)</option>
                 <option value="leverageAtPlus100">Highest leverage if {symbol} doubles (+100%)</option>
                 <option value="leverageAtPlus50">Highest leverage if {symbol} +50%</option>
@@ -412,6 +428,10 @@ export default function Page() {
                   <th>Breakeven</th>
                   <th title={`Leveraged-ETF price at expiry needed to make this contract worth ${targetMultiple}x its premium`}>Price for {targetMultiple}x</th>
                   <th title={`Percent move in the leveraged ETF from today's spot needed to hit ${targetMultiple}x`}>Move to {targetMultiple}x</th>
+                  <th title="First-passage probability the option's mark touches 2x its current premium at any time before expiry">P(touch 2x)</th>
+                  <th title="First-passage probability the option's mark touches 3x its current premium at any time before expiry">P(touch 3x)</th>
+                  <th title="First-passage probability the option's mark touches 5x its current premium at any time before expiry">P(touch 5x)</th>
+                  <th title="First-passage probability the option's mark touches 10x its current premium at any time before expiry">P(touch 10x)</th>
                   <th title={`Probability the option's mark hits ${touchMultiple}x its current premium at any point before expiry (you can sell anytime). Computed as first-passage probability of the underlying touching the spot level that prices the call at ${touchMultiple}x today, holding IV constant.`}>P(touch {touchMultiple}x)</th>
                   <th>P(hit {targetMultiple}x at expiry)</th>
                 </tr>
@@ -433,6 +453,10 @@ export default function Page() {
                     <td>{usd(r.breakeven)}</td>
                     <td>{usd(r.priceForTarget)}</td>
                     <td className={r.moveToTarget > 5 ? "warn" : "good"}>{pct(r.moveToTarget)}</td>
+                    <td className={r.probTouch2  > 0.05 ? "good" : "muted"}>{pct(r.probTouch2,  1)}</td>
+                    <td className={r.probTouch3  > 0.03 ? "good" : "muted"}>{pct(r.probTouch3,  1)}</td>
+                    <td className={r.probTouch5  > 0.01 ? "good" : "muted"}>{pct(r.probTouch5,  2)}</td>
+                    <td className={r.probTouch10 > 0.005 ? "good" : "muted"}>{pct(r.probTouch10, 2)}</td>
                     <td className={r.probTouchMult > 0.05 ? "good" : "muted"}>{pct(r.probTouchMult, 2)}</td>
                     <td className={r.probReachTarget > 0.01 ? "good" : "muted"}>{pct(r.probReachTarget, 2)}</td>
                   </tr>
