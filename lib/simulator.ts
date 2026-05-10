@@ -1,4 +1,4 @@
-import { bsCall } from "./blackScholes";
+import { bsCall, IvSurface, lookupIv } from "./blackScholes";
 
 // Box-Muller standard normal.
 function randn(): number {
@@ -28,6 +28,7 @@ export type SimInput = {
 
   paths: number;               // monte carlo paths
   targetMultiple: number;      // e.g. 100 for 100x
+  ivSurface?: IvSurface;       // optional term-structure-aware IV surface for intermediate marks
 };
 
 export type SimResult = {
@@ -84,10 +85,14 @@ export function simulate(input: SimInput): SimResult {
       const leveragedDailyRet = L * underRet - dailyDrag;
       levPrice = Math.max(0.01, levPrice * (1 + leveragedDailyRet));
       underPrice = newUnder;
-      // Theoretical mark of the option after this day's move, using remaining time and constant IV.
+      // Theoretical mark of the option after this day's move, using remaining time.
+      // If an IV surface is provided, look up IV at (T_remain, ln(K/levPrice)); else use the contract's IV.
       const remainingDays = tradingDays - d - 1;
       const T_remain = Math.max(1 / 365, remainingDays / TRADING_DAYS_PER_YEAR);
-      const mark = bsCall(levPrice, input.strike, T_remain, input.riskFreeRate, sigmaForMark);
+      const sigmaStep = input.ivSurface
+        ? lookupIv(input.ivSurface, T_remain, Math.log(input.strike / levPrice))
+        : sigmaForMark;
+      const mark = bsCall(levPrice, input.strike, T_remain, input.riskFreeRate, sigmaStep);
       if (mark > peakOptValue) peakOptValue = mark;
     }
     const intrinsic = Math.max(0, levPrice - input.strike) * 100 * input.contracts;

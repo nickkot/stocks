@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { LEVERAGED_TICKERS } from "@/lib/tickers";
-import { bsCall, impliedVolCall, probSTAboveK, probTouchUpperBarrier, spotForCallPrice } from "@/lib/blackScholes";
+import { bsCall, impliedVolCall, probSTAboveK, probTouchUpperBarrier, spotForCallPrice, buildIvSurface, IvSurface } from "@/lib/blackScholes";
 import { simulate, SimResult } from "@/lib/simulator";
 
 type OptionRow = {
@@ -98,6 +98,7 @@ export default function Page() {
 
   const [simResult, setSimResult] = useState<SimResult | null>(null);
   const [simRunning, setSimRunning] = useState(false);
+  const [simSurfaceInfo, setSimSurfaceInfo] = useState<string>("constant IV");
 
   // Manual mode (used when the data feed is unavailable, e.g. Yahoo blocking Vercel).
   const [manualMode, setManualMode] = useState(false);
@@ -264,6 +265,21 @@ export default function Page() {
       : selected!.impliedVolatility && selected!.impliedVolatility > 0
         ? selected!.impliedVolatility
         : impliedVolCall(premium, spotPrice, strike, days / 365, riskFreeRate);
+    // Build a term-structure-aware IV surface from the loaded chain when we have multi-expiry data.
+    let ivSurface: IvSurface | undefined;
+    let surfaceSamples = 0;
+    if (!useManual && chain && chain.calls.length >= 12) {
+      const now = Date.now() / 1000;
+      const samples = chain.calls
+        .filter(c => c.impliedVolatility > 0.01 && c.impliedVolatility < 5 && c.strike > 0 && spotPrice > 0)
+        .map(c => ({
+          T: Math.max(1 / 365, (c.expiration - now) / (365 * 86400)),
+          lnM: Math.log(c.strike / spotPrice),
+          iv: c.impliedVolatility,
+        }));
+      const built = buildIvSurface(samples);
+      if (built) { ivSurface = built; surfaceSamples = samples.length; }
+    }
     const result = simulate({
       spotUnderlying: spotPrice,
       muAnnual,
@@ -280,8 +296,10 @@ export default function Page() {
       optionIV: iv,
       paths,
       targetMultiple,
+      ivSurface,
     });
     setSimResult(result);
+    setSimSurfaceInfo(ivSurface ? `term-structure (${surfaceSamples} chain samples)` : "constant IV");
     setSimRunning(false);
   }
 
@@ -655,7 +673,10 @@ export default function Page() {
 
           <div className="warningbox" style={{ marginTop: 16 }}>
             Model: underlying GBM with drift μ and vol σ; leveraged ETF compounded daily as <code>L · r_under − (expense + financing·(L−1))/252</code>;
-            option mark each day = Black-Scholes value at remaining time and current ETF price, holding IV constant at the contract's IV. The "peak multiple" assumes you'd sell at the path's highest theoretical mark — an optimistic bound (you don't know the peak in real time) but the right metric for "could I have made N× at any point". Volatility decay emerges from the path.
+            option mark each day = Black-Scholes at remaining time and current ETF price.
+            IV mode: <strong>{simSurfaceInfo}</strong>{simSurfaceInfo.startsWith("term") && " — IV is interpolated from the loaded chain at each step using a 24×24 grid in (T, log-moneyness) built via inverse-distance weighting. Captures vol smile and term structure: as the ETF approaches your strike, IV is re-read from the surface at the new moneyness."}.
+            Peak multiple = highest theoretical mark on each path; assumes a perfect-timing exit.
+            <br /><span className="muted">Tip: enable "All expirations" before loading the chain to feed the IV surface as much data as possible.</span>
           </div>
         </div>
       )}

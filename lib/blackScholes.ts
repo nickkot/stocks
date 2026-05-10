@@ -60,6 +60,71 @@ export function probTouchUpperBarrier(S: number, B: number, T: number, mu: numbe
   return Math.min(1, Math.max(0, term1 + term2));
 }
 
+// 2D IV surface on a regular grid in (T_years, log-moneyness ln(K/S)).
+// Built from a chain of (T, lnM, IV) samples via inverse-distance weighting (k=8 neighbors).
+// Lookup is bilinear.
+export type IvSurface = {
+  Tgrid: number[];      // ascending years to expiry
+  Mgrid: number[];      // ascending log-moneyness
+  iv: number[][];       // iv[i][j] = IV at Tgrid[i], Mgrid[j]
+};
+
+export function buildIvSurface(samples: { T: number; lnM: number; iv: number }[]): IvSurface | null {
+  const clean = samples.filter(s => Number.isFinite(s.T) && Number.isFinite(s.lnM) && s.iv > 0.01 && s.iv < 5);
+  if (clean.length < 6) return null;
+
+  const Tmin = Math.min(...clean.map(s => s.T));
+  const Tmax = Math.max(...clean.map(s => s.T));
+  const Mmin = Math.min(...clean.map(s => s.lnM));
+  const Mmax = Math.max(...clean.map(s => s.lnM));
+  const NT = 24, NM = 24;
+  const Tgrid = Array.from({ length: NT }, (_, i) => Tmin + (Tmax - Tmin) * i / (NT - 1));
+  const Mgrid = Array.from({ length: NM }, (_, j) => Mmin + (Mmax - Mmin) * j / (NM - 1));
+  const Tscale = Math.max(0.05, Tmax - Tmin);
+  const Mscale = Math.max(0.05, Mmax - Mmin);
+  const iv: number[][] = Array.from({ length: NT }, () => new Array(NM).fill(0));
+
+  for (let i = 0; i < NT; i++) {
+    for (let j = 0; j < NM; j++) {
+      // k=8 nearest IDW
+      const ranked = clean
+        .map(s => {
+          const dT = (s.T - Tgrid[i]) / Tscale;
+          const dM = (s.lnM - Mgrid[j]) / Mscale;
+          return { iv: s.iv, d2: dT * dT + dM * dM };
+        })
+        .sort((a, b) => a.d2 - b.d2)
+        .slice(0, 8);
+      let num = 0, den = 0;
+      for (const r of ranked) {
+        const w = 1 / (r.d2 + 1e-6);
+        num += w * r.iv;
+        den += w;
+      }
+      iv[i][j] = den > 0 ? num / den : 0.5;
+    }
+  }
+  return { Tgrid, Mgrid, iv };
+}
+
+export function lookupIv(surface: IvSurface, T: number, lnM: number): number {
+  const { Tgrid, Mgrid, iv } = surface;
+  const NT = Tgrid.length, NM = Mgrid.length;
+  // Clamp to grid range.
+  const Tc = Math.max(Tgrid[0], Math.min(Tgrid[NT - 1], T));
+  const Mc = Math.max(Mgrid[0], Math.min(Mgrid[NM - 1], lnM));
+  // Find indices.
+  let i0 = 0;
+  for (let i = 0; i < NT - 1; i++) if (Tgrid[i] <= Tc && Tc <= Tgrid[i + 1]) { i0 = i; break; }
+  let j0 = 0;
+  for (let j = 0; j < NM - 1; j++) if (Mgrid[j] <= Mc && Mc <= Mgrid[j + 1]) { j0 = j; break; }
+  const tT = (Tc - Tgrid[i0]) / Math.max(1e-9, Tgrid[i0 + 1] - Tgrid[i0]);
+  const tM = (Mc - Mgrid[j0]) / Math.max(1e-9, Mgrid[j0 + 1] - Mgrid[j0]);
+  const a = iv[i0][j0]     * (1 - tM) + iv[i0][j0 + 1]     * tM;
+  const b = iv[i0 + 1][j0] * (1 - tM) + iv[i0 + 1][j0 + 1] * tM;
+  return a * (1 - tT) + b * tT;
+}
+
 // Inverse of bsCall: find the spot price that makes the call worth `targetPrice` today,
 // holding T, sigma, r constant. Bisection on [K*0.01, K*100]. Returns NaN if not bracketed.
 export function spotForCallPrice(targetPrice: number, K: number, T: number, r: number, sigma: number, q = 0): number {
