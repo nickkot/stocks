@@ -109,13 +109,27 @@ export default function Page() {
     loadChain(symbol, ts);
   }
 
+  const [requireQuote, setRequireQuote] = useState(true);
+
   const filteredCalls = useMemo(() => {
     if (!chain) return [];
     return chain.calls
       .filter(c => c.pctOTM * 100 >= minOTM && c.pctOTM * 100 <= maxOTM)
       .filter(c => (c.openInterest ?? 0) >= minOI)
-      .filter(c => c.mid > 0)
+      .filter(c => !requireQuote || c.mid > 0)
       .sort((a, b) => a.strike - b.strike);
+  }, [chain, minOTM, maxOTM, minOI, requireQuote]);
+
+  // Diagnostics for the empty state.
+  const filterDiag = useMemo(() => {
+    if (!chain) return null;
+    const total = chain.calls.length;
+    const otmPass = chain.calls.filter(c => c.pctOTM * 100 >= minOTM && c.pctOTM * 100 <= maxOTM).length;
+    const oiPass = chain.calls.filter(c => (c.openInterest ?? 0) >= minOI).length;
+    const quotePass = chain.calls.filter(c => c.mid > 0).length;
+    const minOTMActual = total ? Math.min(...chain.calls.map(c => c.pctOTM * 100)) : 0;
+    const maxOTMActual = total ? Math.max(...chain.calls.map(c => c.pctOTM * 100)) : 0;
+    return { total, otmPass, oiPass, quotePass, minOTMActual, maxOTMActual };
   }, [chain, minOTM, maxOTM, minOI]);
 
   // Decorate each row with derived metrics: T (years), IV, breakeven, multiple to 100x, P(reach strike), implied move.
@@ -277,6 +291,13 @@ export default function Page() {
             <div className="field"><label>Min %OTM</label><input type="number" value={minOTM} onChange={e => setMinOTM(Number(e.target.value))} /></div>
             <div className="field"><label>Max %OTM</label><input type="number" value={maxOTM} onChange={e => setMaxOTM(Number(e.target.value))} /></div>
             <div className="field"><label>Min OI</label><input type="number" value={minOI} onChange={e => setMinOI(Number(e.target.value))} /></div>
+            <div className="field" style={{ minWidth: 140 }}>
+              <label>Require live quote</label>
+              <select value={requireQuote ? "1" : "0"} onChange={e => setRequireQuote(e.target.value === "1")}>
+                <option value="1">Yes (mid &gt; 0)</option>
+                <option value="0">No (show all strikes)</option>
+              </select>
+            </div>
           </div>
         </div>
       </div>
@@ -285,7 +306,18 @@ export default function Page() {
         <h2>Far-OTM call candidates {expDate ? `· ${dateStr(expDate)}` : ""}</h2>
         {loading && <div className="muted">Loading chain…</div>}
         {err && <div className="bad">Error: {err}</div>}
-        {!loading && !err && rows.length === 0 && <div className="muted">No calls match those filters. Loosen %OTM range.</div>}
+        {!loading && !err && !chain && (
+          <div className="muted">Pick a ticker above and click <strong>Load chain</strong>.</div>
+        )}
+        {!loading && !err && chain && rows.length === 0 && filterDiag && (
+          <div className="muted" style={{ lineHeight: 1.6 }}>
+            <strong>{filterDiag.total}</strong> calls returned for {chain.symbol} on {expDate ? dateStr(expDate) : "—"} (spot {usd(chain.spot)}).<br />
+            • {filterDiag.otmPass} pass the {minOTM}–{maxOTM}% OTM filter (chain has strikes from {filterDiag.minOTMActual.toFixed(0)}% to {filterDiag.maxOTMActual.toFixed(0)}% OTM)<br />
+            • {filterDiag.oiPass} pass min OI ≥ {minOI}<br />
+            • {filterDiag.quotePass} have a non-zero mid quote{requireQuote ? " (required)" : " (not required)"}<br />
+            <span style={{ color: "var(--warn)" }}>Tip: widen %OTM to 0–500, or set "Require live quote" to No to see strikes without market quotes.</span>
+          </div>
+        )}
         {!loading && rows.length > 0 && (
           <div style={{ maxHeight: 480, overflow: "auto", borderRadius: 6, border: "1px solid var(--border)" }}>
             <table>
