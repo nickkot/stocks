@@ -44,7 +44,10 @@ export default function Page() {
 
   const [minOTM, setMinOTM] = useState(30);   // %
   const [maxOTM, setMaxOTM] = useState(300);  // %
-  const [minOI, setMinOI] = useState(0);
+  const [minOI, setMinOI] = useState(100);
+  const [minVolume, setMinVolume] = useState(0);
+  const [maxSpreadPct, setMaxSpreadPct] = useState(50); // (ask-bid)/mid in percent
+  const [requireBid, setRequireBid] = useState(true);
 
   const [selected, setSelected] = useState<OptionRow | null>(null);
 
@@ -113,16 +116,22 @@ export default function Page() {
     loadChain(symbol, ts);
   }
 
-  const [requireQuote, setRequireQuote] = useState(true);
+  // Relative bid/ask spread as a percentage of mid. Returns Infinity if either side is missing.
+  const spreadPctOf = (c: { bid: number; ask: number; mid: number }) => {
+    if (!c.bid || !c.ask || !c.mid) return Infinity;
+    return ((c.ask - c.bid) / c.mid) * 100;
+  };
 
   const filteredCalls = useMemo(() => {
     if (!chain) return [];
     return chain.calls
       .filter(c => c.pctOTM * 100 >= minOTM && c.pctOTM * 100 <= maxOTM)
       .filter(c => (c.openInterest ?? 0) >= minOI)
-      .filter(c => !requireQuote || c.mid > 0)
+      .filter(c => (c.volume ?? 0) >= minVolume)
+      .filter(c => !requireBid || c.bid > 0)
+      .filter(c => spreadPctOf(c) <= maxSpreadPct)
       .sort((a, b) => a.strike - b.strike);
-  }, [chain, minOTM, maxOTM, minOI, requireQuote]);
+  }, [chain, minOTM, maxOTM, minOI, minVolume, requireBid, maxSpreadPct]);
 
   // Diagnostics for the empty state.
   const filterDiag = useMemo(() => {
@@ -130,11 +139,13 @@ export default function Page() {
     const total = chain.calls.length;
     const otmPass = chain.calls.filter(c => c.pctOTM * 100 >= minOTM && c.pctOTM * 100 <= maxOTM).length;
     const oiPass = chain.calls.filter(c => (c.openInterest ?? 0) >= minOI).length;
-    const quotePass = chain.calls.filter(c => c.mid > 0).length;
+    const volPass = chain.calls.filter(c => (c.volume ?? 0) >= minVolume).length;
+    const bidPass = chain.calls.filter(c => c.bid > 0).length;
+    const spreadPass = chain.calls.filter(c => spreadPctOf(c) <= maxSpreadPct).length;
     const minOTMActual = total ? Math.min(...chain.calls.map(c => c.pctOTM * 100)) : 0;
     const maxOTMActual = total ? Math.max(...chain.calls.map(c => c.pctOTM * 100)) : 0;
-    return { total, otmPass, oiPass, quotePass, minOTMActual, maxOTMActual };
-  }, [chain, minOTM, maxOTM, minOI]);
+    return { total, otmPass, oiPass, volPass, bidPass, spreadPass, minOTMActual, maxOTMActual };
+  }, [chain, minOTM, maxOTM, minOI, minVolume, maxSpreadPct]);
 
   // Sort selector for the candidates table.
   type SortKey = "leverageAtPlus100" | "leverageAtPlus50" | "moveToTarget" | "probTarget" | "probTouch" | "probTouch2" | "probTouch3" | "probTouch5" | "probTouch10" | "cheapest" | "strike";
@@ -353,18 +364,37 @@ export default function Page() {
           </div>
         </div>
         <div className="panel">
-          <h2>Filter</h2>
+          <h2>Filter <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>(liquidity defaults: OI ≥ 100, bid &gt; 0, spread ≤ 50%)</span></h2>
           <div className="row">
             <div className="field"><label>Min %OTM</label><input type="number" value={minOTM} onChange={e => setMinOTM(Number(e.target.value))} /></div>
             <div className="field"><label>Max %OTM</label><input type="number" value={maxOTM} onChange={e => setMaxOTM(Number(e.target.value))} /></div>
-            <div className="field"><label>Min OI</label><input type="number" value={minOI} onChange={e => setMinOI(Number(e.target.value))} /></div>
+            <div className="field" title="Open interest = number of contracts outstanding. Higher = more liquid.">
+              <label>Min OI</label><input type="number" value={minOI} onChange={e => setMinOI(Number(e.target.value))} />
+            </div>
+            <div className="field" title="Today's traded volume. 0 = ignore.">
+              <label>Min volume</label><input type="number" value={minVolume} onChange={e => setMinVolume(Number(e.target.value))} />
+            </div>
+            <div className="field" title="Max bid/ask spread as % of mid. Wider = harder to exit at fair value.">
+              <label>Max spread %</label><input type="number" value={maxSpreadPct} onChange={e => setMaxSpreadPct(Number(e.target.value))} />
+            </div>
             <div className="field" style={{ minWidth: 140 }}>
-              <label>Require live quote</label>
-              <select value={requireQuote ? "1" : "0"} onChange={e => setRequireQuote(e.target.value === "1")}>
-                <option value="1">Yes (mid &gt; 0)</option>
-                <option value="0">No (show all strikes)</option>
+              <label>Require bid &gt; 0</label>
+              <select value={requireBid ? "1" : "0"} onChange={e => setRequireBid(e.target.value === "1")}>
+                <option value="1">Yes (tradable)</option>
+                <option value="0">No (show all)</option>
               </select>
             </div>
+          </div>
+          <div className="row" style={{ marginTop: 6 }}>
+            <button className="secondary" onClick={() => { setMinOI(100); setMinVolume(0); setMaxSpreadPct(50); setRequireBid(true); }}>
+              Liquidity defaults
+            </button>
+            <button className="secondary" onClick={() => { setMinOI(500); setMinVolume(10); setMaxSpreadPct(25); setRequireBid(true); }}>
+              Strict (OI ≥ 500, spread ≤ 25%)
+            </button>
+            <button className="secondary" onClick={() => { setMinOI(0); setMinVolume(0); setMaxSpreadPct(1e6); setRequireBid(false); }}>
+              No liquidity filter
+            </button>
           </div>
         </div>
       </div>
@@ -405,8 +435,10 @@ export default function Page() {
             <strong>{filterDiag.total}</strong> calls returned for {chain.symbol} on {expDate ? dateStr(expDate) : "—"} (spot {usd(chain.spot)}).<br />
             • {filterDiag.otmPass} pass the {minOTM}–{maxOTM}% OTM filter (chain has strikes from {filterDiag.minOTMActual.toFixed(0)}% to {filterDiag.maxOTMActual.toFixed(0)}% OTM)<br />
             • {filterDiag.oiPass} pass min OI ≥ {minOI}<br />
-            • {filterDiag.quotePass} have a non-zero mid quote{requireQuote ? " (required)" : " (not required)"}<br />
-            <span style={{ color: "var(--warn)" }}>Tip: widen %OTM to 0–500, or set "Require live quote" to No to see strikes without market quotes.</span>
+            • {filterDiag.volPass} pass min volume ≥ {minVolume}<br />
+            • {filterDiag.bidPass} have a tradable bid &gt; 0{requireBid ? " (required)" : " (not required)"}<br />
+            • {filterDiag.spreadPass} have bid/ask spread ≤ {maxSpreadPct}% of mid<br />
+            <span style={{ color: "var(--warn)" }}>Tip: click "No liquidity filter" to inspect the raw chain, or widen %OTM to 0–500.</span>
           </div>
         )}
         {!loading && rows.length > 0 && (
@@ -422,6 +454,8 @@ export default function Page() {
                   <th>Bid/Ask</th>
                   <th>IV</th>
                   <th>OI</th>
+                  <th title="Today's traded volume">Vol</th>
+                  <th title="Bid/ask spread as % of mid (lower = more liquid)">Spread</th>
                   <th title="Payoff multiple at expiry if the leveraged ETF moves +50%">Mult @+50%</th>
                   <th title="Payoff multiple at expiry if the leveraged ETF doubles (+100%)">Mult @+100%</th>
                   <th title="Payoff multiple at expiry if the leveraged ETF triples (+200%)">Mult @+200%</th>
@@ -446,7 +480,11 @@ export default function Page() {
                     <td>{usd(r.mid)}</td>
                     <td className="muted">{fmt(r.bid)} / {fmt(r.ask)}</td>
                     <td>{pct(r.iv)}</td>
-                    <td>{r.openInterest}</td>
+                    <td className={r.openInterest >= 500 ? "good" : r.openInterest >= 100 ? "" : "warn"}>{r.openInterest}</td>
+                    <td className="muted">{r.volume}</td>
+                    <td className={(() => { const s = spreadPctOf(r); return s <= 10 ? "good" : s <= 25 ? "" : "warn"; })()}>
+                      {(() => { const s = spreadPctOf(r); return Number.isFinite(s) ? `${s.toFixed(0)}%` : "—"; })()}
+                    </td>
                     <td className={r.leverageAtPlus50  >= 1 ? "good" : "muted"}>{fmt(r.leverageAtPlus50)}x</td>
                     <td className={r.leverageAtPlus100 >= 5 ? "good" : "muted"}>{fmt(r.leverageAtPlus100)}x</td>
                     <td className={r.leverageAtPlus200 >= 20 ? "good" : "muted"}>{fmt(r.leverageAtPlus200)}x</td>
