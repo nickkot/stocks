@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { LEVERAGED_TICKERS } from "@/lib/tickers";
-import { bsCall, bsPut, impliedVolCall, impliedVolPut, probSTAboveK, probTouchUpperBarrier, probTouchLowerBarrier, spotForCallPrice, spotForPutPrice, buildIvSurface, IvSurface } from "@/lib/blackScholes";
+import { bsCall, bsPut, bsGreeks, impliedVolCall, impliedVolPut, probSTAboveK, probTouchUpperBarrier, probTouchLowerBarrier, spotForCallPrice, spotForPutPrice, buildIvSurface, IvSurface } from "@/lib/blackScholes";
 import { simulate, SimResult } from "@/lib/simulator";
 
 type OptionRow = {
@@ -194,7 +194,7 @@ export default function Page() {
   }, [chain, allContracts, sideFilter, minOTM, maxOTM, minOI, minVolume, maxSpreadPct]);
 
   // Sort selector for the candidates table.
-  type SortKey = "leverageAtPlus100" | "leverageAtPlus50" | "moveToTarget" | "probTarget" | "probTouch" | "probTouch2" | "probTouch3" | "probTouch5" | "probTouch10" | "cheapest" | "strike";
+  type SortKey = "leverageAtPlus100" | "moveToTarget" | "probTarget" | "probTouch" | "probTouch2" | "probTouch3" | "probTouch10" | "delta" | "theta" | "cheapest" | "strike";
   const [sortKey, setSortKey] = useState<SortKey>("leverageAtPlus100");
 
   // Decorate each row with derived metrics.
@@ -234,9 +234,7 @@ export default function Page() {
           : Math.max(0, finalPrice - c.strike);
         return intrinsic / c.mid;
       };
-      const leverageAtPlus50 = payoffMult(0.5);
       const leverageAtPlus100 = payoffMult(1.0);
-      const leverageAtPlus200 = payoffMult(2.0);
       // First-passage barrier touch — upper for calls, lower for puts.
       const ivForTouch = iv > 0 ? iv : 0.5;
       const probTouchAt = (mult: number) => {
@@ -255,25 +253,28 @@ export default function Page() {
       const probTouchMult = probTouchAt(touchMultiple);
       const probTouch2  = probTouchAt(2);
       const probTouch3  = probTouchAt(3);
-      const probTouch5  = probTouchAt(5);
       const probTouch10 = probTouchAt(10);
+      // Greeks at current spot. Theta as % of premium per day (typically negative).
+      const greeks = bsGreeks(c.side, chain.spot, c.strike, T, riskFreeRate, ivForTouch);
+      const thetaPctPerDay = c.mid > 0 ? (greeks.theta / 365) / c.mid : 0;
       return {
         ...c, T, iv, breakeven, priceForTarget, moveToTarget,
         probReachStrike, probReachTarget,
-        leverageAtPlus50, leverageAtPlus100, leverageAtPlus200,
-        probTouchMult, probTouch2, probTouch3, probTouch5, probTouch10,
+        leverageAtPlus100,
+        probTouchMult, probTouch2, probTouch3, probTouch10,
+        delta: greeks.delta, thetaPctPerDay,
       };
     });
     const cmp: Record<SortKey, (a: any, b: any) => number> = {
       leverageAtPlus100: (a, b) => b.leverageAtPlus100 - a.leverageAtPlus100,
-      leverageAtPlus50:  (a, b) => b.leverageAtPlus50  - a.leverageAtPlus50,
       moveToTarget:      (a, b) => a.moveToTarget      - b.moveToTarget,
       probTarget:        (a, b) => b.probReachTarget   - a.probReachTarget,
       probTouch:         (a, b) => b.probTouchMult     - a.probTouchMult,
       probTouch2:        (a, b) => b.probTouch2        - a.probTouch2,
       probTouch3:        (a, b) => b.probTouch3        - a.probTouch3,
-      probTouch5:        (a, b) => b.probTouch5        - a.probTouch5,
       probTouch10:       (a, b) => b.probTouch10       - a.probTouch10,
+      delta:             (a, b) => Math.abs(b.delta)   - Math.abs(a.delta),
+      theta:             (a, b) => b.thetaPctPerDay    - a.thetaPctPerDay, // least-negative first
       cheapest:          (a, b) => a.mid               - b.mid,
       strike:            (a, b) => a.strike            - b.strike,
     };
@@ -502,13 +503,13 @@ export default function Page() {
               <select value={sortKey} onChange={e => setSortKey(e.target.value as any)}>
                 <option value="probTouch2">Highest P(touch 2x anytime)</option>
                 <option value="probTouch3">Highest P(touch 3x anytime)</option>
-                <option value="probTouch5">Highest P(touch 5x anytime)</option>
                 <option value="probTouch10">Highest P(touch 10x anytime)</option>
                 <option value="probTouch">Highest P(touch {touchMultiple}x anytime)</option>
-                <option value="leverageAtPlus100">Highest leverage if {symbol} doubles (+100%)</option>
-                <option value="leverageAtPlus50">Highest leverage if {symbol} +50%</option>
+                <option value="leverageAtPlus100">Highest leverage on 100% favorable move</option>
                 <option value="probTarget">Highest P(hit {targetMultiple}x at expiry)</option>
                 <option value="moveToTarget">Smallest move needed for {targetMultiple}x</option>
+                <option value="theta">Lowest daily decay (θ%/day, closest to 0)</option>
+                <option value="delta">Highest |delta| (most stock-like)</option>
                 <option value="cheapest">Cheapest premium</option>
                 <option value="strike">Strike (low → high)</option>
               </select>
@@ -546,20 +547,17 @@ export default function Page() {
                   <th>Strike</th>
                   <th>%OTM</th>
                   <th>Mid</th>
-                  <th>Bid/Ask</th>
                   <th>IV</th>
+                  <th title="Black–Scholes delta. Roughly the probability of finishing ITM, and the dollar change per $1 spot move. Negative for puts.">Δ</th>
+                  <th title="Black–Scholes theta as % of premium per day. Negative = daily bleed. e.g. −2%/day means the option loses ~2% of its current value each calendar day, all else equal.">θ%/day</th>
                   <th>OI</th>
-                  <th title="Today's traded volume">Vol</th>
                   <th title="Bid/ask spread as % of mid (lower = more liquid)">Spread</th>
-                  <th title="Payoff multiple at expiry given a 50% favorable move (calls: +50% spot, puts: −50% spot)">Mult @50%</th>
                   <th title="Payoff multiple at expiry given a 100% favorable move (calls: spot doubles, puts: spot → 0)">Mult @100%</th>
-                  <th title="Payoff multiple at expiry given a 200% favorable move (calls: spot triples, puts: capped at spot=0)">Mult @200%</th>
                   <th>Breakeven</th>
                   <th title={`Leveraged-ETF price at expiry needed to make this contract worth ${targetMultiple}x its premium`}>Price for {targetMultiple}x</th>
                   <th title={`Percent move in the leveraged ETF from today's spot needed to hit ${targetMultiple}x`}>Move to {targetMultiple}x</th>
                   <th title="First-passage probability the option's mark touches 2x its current premium at any time before expiry">P(touch 2x)</th>
                   <th title="First-passage probability the option's mark touches 3x its current premium at any time before expiry">P(touch 3x)</th>
-                  <th title="First-passage probability the option's mark touches 5x its current premium at any time before expiry">P(touch 5x)</th>
                   <th title="First-passage probability the option's mark touches 10x its current premium at any time before expiry">P(touch 10x)</th>
                   <th title={`Probability the option's mark hits ${touchMultiple}x its current premium at any point before expiry (you can sell anytime). Computed as first-passage probability of the underlying touching the spot level that prices the call at ${touchMultiple}x today, holding IV constant.`}>P(touch {touchMultiple}x)</th>
                   <th>P(hit {targetMultiple}x at expiry)</th>
@@ -574,22 +572,21 @@ export default function Page() {
                     <td>{usd(r.strike)}</td>
                     <td>{pct(r.pctOTM)}</td>
                     <td>{usd(r.mid)}</td>
-                    <td className="muted">{fmt(r.bid)} / {fmt(r.ask)}</td>
                     <td>{pct(r.iv)}</td>
+                    <td className="muted">{r.delta.toFixed(2)}</td>
+                    <td className={r.thetaPctPerDay > -0.01 ? "good" : r.thetaPctPerDay > -0.03 ? "" : "warn"}>
+                      {(r.thetaPctPerDay * 100).toFixed(2)}%
+                    </td>
                     <td className={r.openInterest >= 100 ? "good" : r.openInterest >= 10 ? "" : "warn"}>{r.openInterest}</td>
-                    <td className="muted">{r.volume}</td>
                     <td className={(() => { const s = spreadPctOf(r); return s <= 10 ? "good" : s <= 25 ? "" : "warn"; })()}>
                       {(() => { const s = spreadPctOf(r); return Number.isFinite(s) ? `${s.toFixed(0)}%` : "—"; })()}
                     </td>
-                    <td className={r.leverageAtPlus50  >= 1 ? "good" : "muted"}>{fmt(r.leverageAtPlus50)}x</td>
                     <td className={r.leverageAtPlus100 >= 5 ? "good" : "muted"}>{fmt(r.leverageAtPlus100)}x</td>
-                    <td className={r.leverageAtPlus200 >= 20 ? "good" : "muted"}>{fmt(r.leverageAtPlus200)}x</td>
                     <td>{usd(r.breakeven)}</td>
                     <td>{usd(r.priceForTarget)}</td>
                     <td className={r.moveToTarget > 5 ? "warn" : "good"}>{pct(r.moveToTarget)}</td>
                     <td className={r.probTouch2  > 0.05 ? "good" : "muted"}>{pct(r.probTouch2,  1)}</td>
                     <td className={r.probTouch3  > 0.03 ? "good" : "muted"}>{pct(r.probTouch3,  1)}</td>
-                    <td className={r.probTouch5  > 0.01 ? "good" : "muted"}>{pct(r.probTouch5,  2)}</td>
                     <td className={r.probTouch10 > 0.005 ? "good" : "muted"}>{pct(r.probTouch10, 2)}</td>
                     <td className={r.probTouchMult > 0.05 ? "good" : "muted"}>{pct(r.probTouchMult, 2)}</td>
                     <td className={r.probReachTarget > 0.01 ? "good" : "muted"}>{pct(r.probReachTarget, 2)}</td>

@@ -33,6 +33,32 @@ export function bsPut(S: number, K: number, T: number, r: number, sigma: number,
   return K * Math.exp(-r * T) * normCdf(-d2) - S * Math.exp(-q * T) * normCdf(-d1);
 }
 
+function normPdf(x: number): number {
+  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+}
+
+// Black–Scholes delta and theta (per year). Theta is typically negative for long options.
+export function bsGreeks(side: "C" | "P", S: number, K: number, T: number, r: number, sigma: number, q = 0): { delta: number; theta: number } {
+  if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) return { delta: 0, theta: 0 };
+  const sqT = sigma * Math.sqrt(T);
+  const d1 = (Math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / sqT;
+  const d2 = d1 - sqT;
+  const eqT = Math.exp(-q * T);
+  const erT = Math.exp(-r * T);
+  const phi = normPdf(d1);
+  const common = -S * eqT * phi * sigma / (2 * Math.sqrt(T));
+  if (side === "C") {
+    return {
+      delta: eqT * normCdf(d1),
+      theta: common - r * K * erT * normCdf(d2) + q * S * eqT * normCdf(d1),
+    };
+  }
+  return {
+    delta: -eqT * normCdf(-d1),
+    theta: common + r * K * erT * normCdf(-d2) - q * S * eqT * normCdf(-d1),
+  };
+}
+
 // Implied vol via bisection on a call price.
 export function impliedVolCall(price: number, S: number, K: number, T: number, r: number, q = 0): number {
   if (price <= 0 || T <= 0) return 0;
