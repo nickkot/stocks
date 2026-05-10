@@ -54,7 +54,7 @@ async function tradierFetch(path: string, params: Record<string, string>) {
   return JSON.parse(text);
 }
 
-async function fetchTradier(symbol: string, dateStr?: string): Promise<OutChain> {
+async function fetchTradier(symbol: string, dateStr?: string, allExpirations = false): Promise<OutChain> {
   const quoteJson = await tradierFetch("/v1/markets/quotes", { symbols: symbol });
   const q = quoteJson?.quotes?.quote;
   const spot = Array.isArray(q) ? q[0]?.last : q?.last;
@@ -66,28 +66,50 @@ async function fetchTradier(symbol: string, dateStr?: string): Promise<OutChain>
   if (!expDates.length) throw new Error("Tradier: no expirations");
   const chosen = dateStr || expDates[0];
 
-  const chainJson = await tradierFetch("/v1/markets/options/chains", { symbol, expiration: chosen, greeks: "true" });
-  const opts = chainJson?.options?.option ?? [];
-  const calls = (Array.isArray(opts) ? opts : [opts])
-    .filter((o: any) => o.option_type === "call")
-    .map((o: any): OutOption => {
-      const bid = o.bid ?? 0;
-      const ask = o.ask ?? 0;
-      const last = o.last ?? 0;
-      const mid = bid && ask ? (bid + ask) / 2 : last;
-      const expEpoch = Math.floor(new Date(o.expiration_date + "T20:00:00Z").getTime() / 1000);
-      return {
-        contractSymbol: o.symbol,
-        strike: o.strike,
-        bid, ask, last, mid,
-        volume: o.volume ?? 0,
-        openInterest: o.open_interest ?? 0,
-        impliedVolatility: o.greeks?.mid_iv ?? o.greeks?.smv_vol ?? 0,
-        inTheMoney: spot > o.strike,
-        pctOTM: spot > 0 ? (o.strike - spot) / spot : 0,
-        expiration: expEpoch,
-      };
-    });
+  const mapOpt = (o: any): OutOption => {
+    const bid = o.bid ?? 0;
+    const ask = o.ask ?? 0;
+    const last = o.last ?? 0;
+    const mid = bid && ask ? (bid + ask) / 2 : last;
+    const expEpoch = Math.floor(new Date(o.expiration_date + "T20:00:00Z").getTime() / 1000);
+    return {
+      contractSymbol: o.symbol,
+      strike: o.strike,
+      bid, ask, last, mid,
+      volume: o.volume ?? 0,
+      openInterest: o.open_interest ?? 0,
+      impliedVolatility: o.greeks?.mid_iv ?? o.greeks?.smv_vol ?? 0,
+      inTheMoney: spot > o.strike,
+      pctOTM: spot > 0 ? (o.strike - spot) / spot : 0,
+      expiration: expEpoch,
+    };
+  };
+
+  let calls: OutOption[];
+  if (allExpirations) {
+    // Tradier requires one request per expiration. Run them in parallel with bounded concurrency.
+    const CONCURRENCY = 8;
+    const out: OutOption[] = [];
+    for (let i = 0; i < expDates.length; i += CONCURRENCY) {
+      const batch = expDates.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(d => tradierFetch("/v1/markets/options/chains", { symbol, expiration: d, greeks: "true" }))
+      );
+      for (const r of results) {
+        if (r.status !== "fulfilled") continue;
+        const opts = r.value?.options?.option ?? [];
+        const arr = Array.isArray(opts) ? opts : [opts];
+        for (const o of arr) if (o.option_type === "call") out.push(mapOpt(o));
+      }
+    }
+    calls = out.sort((a, b) => a.expiration - b.expiration || a.strike - b.strike);
+  } else {
+    const chainJson = await tradierFetch("/v1/markets/options/chains", { symbol, expiration: chosen, greeks: "true" });
+    const opts = chainJson?.options?.option ?? [];
+    calls = (Array.isArray(opts) ? opts : [opts])
+      .filter((o: any) => o.option_type === "call")
+      .map(mapOpt);
+  }
 
   return {
     symbol,
@@ -96,7 +118,7 @@ async function fetchTradier(symbol: string, dateStr?: string): Promise<OutChain>
     expirations: expDates.map(d => Math.floor(new Date(d + "T20:00:00Z").getTime() / 1000)),
     selectedExpiration: Math.floor(new Date(chosen + "T20:00:00Z").getTime() / 1000),
     calls,
-    via: "tradier",
+    via: allExpirations ? "tradier-all" : "tradier",
   };
 }
 
@@ -119,7 +141,7 @@ function parseOcc(occ: string): { root: string; expiration: number; type: "C" | 
   return { root, expiration: epoch, type, strike: strikeRaw / 1000 };
 }
 
-async function fetchCboe(symbol: string, dateEpoch?: string): Promise<OutChain> {
+async function fetchCboe(symbol: string, dateEpoch?: string, allExpirations = false): Promise<OutChain> {
   const tryPaths = [
     `https://cdn.cboe.com/api/global/delayed_quotes/options/${encodeURIComponent(symbol)}.json`,
     `https://cdn.cboe.com/api/global/delayed_quotes/options/_${encodeURIComponent(symbol)}.json`,
@@ -166,13 +188,15 @@ async function fetchCboe(symbol: string, dateEpoch?: string): Promise<OutChain> 
   const expirations = [...byExp.keys()].sort((a, b) => a - b);
   if (!expirations.length) throw new Error("cboe: no call options parsed");
   const chosen = dateEpoch ? Number(dateEpoch) : expirations[0];
-  const calls = (byExp.get(chosen) ?? byExp.get(expirations[0])!).sort((a, b) => a.strike - b.strike);
+  const calls = allExpirations
+    ? expirations.flatMap(e => byExp.get(e) ?? []).sort((a, b) => a.expiration - b.expiration || a.strike - b.strike)
+    : (byExp.get(chosen) ?? byExp.get(expirations[0])!).sort((a, b) => a.strike - b.strike);
 
   return {
     symbol, shortName, spot, expirations,
     selectedExpiration: chosen,
     calls,
-    via: "cboe",
+    via: allExpirations ? "cboe-all" : "cboe",
   };
 }
 
@@ -253,8 +277,9 @@ export async function GET(req: NextRequest) {
   const date = searchParams.get("date") || undefined;
   const debug = searchParams.get("debug") === "1";
   const force = searchParams.get("force") === "1";
+  const all = searchParams.get("all") === "1";
 
-  const result = await getCachedChain(symbol, date, force);
+  const result = await getCachedChain(symbol, date, force, all);
 
   if ("error" in result) {
     return NextResponse.json(result, { status: 502 });
@@ -278,9 +303,10 @@ const STALE_MS = 24 * 60 * 60 * 1000; // serve stale for up to 24h on failure
 async function getCachedChain(
   symbol: string,
   date: string | undefined,
-  force: boolean
+  force: boolean,
+  allExpirations: boolean
 ): Promise<OutChain | { error: string; hint: string; providers: { tradier: boolean; yahoo: boolean }; stale?: OutChain }> {
-  const key = `${symbol}|${date ?? "first"}`;
+  const key = `${symbol}|${date ?? "first"}|${allExpirations ? "all" : "one"}`;
   const cached = CACHE.get(key);
   if (!force && cached && Date.now() - cached.at < TTL_MS) return cached.data;
 
@@ -292,13 +318,17 @@ async function getCachedChain(
     const tradierAvailable = !!process.env.TRADIER_TOKEN;
     const errors: string[] = [];
     if (tradierAvailable) {
-      try { return await fetchTradier(symbol, date); }
+      try { return await fetchTradier(symbol, date, allExpirations); }
       catch (e: any) { errors.push(`tradier: ${e.message}`); }
     }
-    try { return await fetchCboe(symbol, date); }
+    try { return await fetchCboe(symbol, date, allExpirations); }
     catch (e: any) { errors.push(e.message); }
-    try { return await fetchYahoo(symbol, date); }
-    catch (e: any) { errors.push(e.message); throw new Error(errors.join(" || ")); }
+    // Yahoo only returns one expiration per call; skip in all-expirations mode.
+    if (!allExpirations) {
+      try { return await fetchYahoo(symbol, date); }
+      catch (e: any) { errors.push(e.message); }
+    }
+    throw new Error(errors.join(" || "));
   })();
 
   INFLIGHT.set(key, fetchPromise);

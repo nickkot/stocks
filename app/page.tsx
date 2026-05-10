@@ -73,14 +73,17 @@ export default function Page() {
   const ticker = LEVERAGED_TICKERS.find(t => t.symbol === symbol);
   const leverage = ticker?.leverage ?? 3;
 
-  async function loadChain(sym: string, date?: number, force = false) {
+  const [allExpirations, setAllExpirations] = useState(false);
+
+  async function loadChain(sym: string, date?: number, force = false, all = allExpirations) {
     if (loading) return; // single-flight: ignore overlapping clicks
     setLoading(true); setErr(null);
     try {
       const url = new URL("/api/options", window.location.origin);
       url.searchParams.set("symbol", sym);
-      if (date) url.searchParams.set("date", String(date));
+      if (date && !all) url.searchParams.set("date", String(date));
       if (force) url.searchParams.set("force", "1");
+      if (all) url.searchParams.set("all", "1");
       const res = await fetch(url.toString());
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Failed to load");
@@ -292,8 +295,20 @@ export default function Page() {
               Force refresh (skip cache)
             </button>
           )}
+          <label className="muted" style={{ alignSelf: "center", fontSize: 12, display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={allExpirations}
+              onChange={e => {
+                const v = e.target.checked;
+                setAllExpirations(v);
+                if (chain) loadChain(symbol, undefined, false, v);
+              }}
+            />
+            All expirations (cross-date table)
+          </label>
           <div className="muted" style={{ alignSelf: "center", fontSize: 12 }}>
-            Chains are cached for 10 min server-side. Click a ticker, then load — no auto-fetching.
+            Cached 10 min server-side.
           </div>
         </div>
         {ticker && (
@@ -312,10 +327,16 @@ export default function Page() {
           <h2>Expiration</h2>
           <div className="row">
             <div className="field">
-              <label>Date</label>
-              <select value={expDate ?? ""} onChange={e => pickExp(Number(e.target.value))}>
-                {chain?.expirations?.map(ts => <option key={ts} value={ts}>{dateStr(ts)}</option>)}
-              </select>
+              <label>{allExpirations ? "Mode" : "Date"}</label>
+              {allExpirations ? (
+                <div style={{ alignSelf: "center", fontSize: 13 }}>
+                  All expirations ({chain?.expirations?.length ?? 0}) · {chain?.calls?.length ?? 0} contracts
+                </div>
+              ) : (
+                <select value={expDate ?? ""} onChange={e => pickExp(Number(e.target.value))}>
+                  {chain?.expirations?.map(ts => <option key={ts} value={ts}>{dateStr(ts)}</option>)}
+                </select>
+              )}
             </div>
           </div>
         </div>
@@ -337,7 +358,7 @@ export default function Page() {
       </div>
 
       <div className="panel" style={{ marginBottom: 16 }}>
-        <h2>Far-OTM call candidates {expDate ? `· ${dateStr(expDate)}` : ""}</h2>
+        <h2>Far-OTM call candidates {allExpirations ? "· all expirations" : (expDate ? `· ${dateStr(expDate)}` : "")}</h2>
         {chain && rows.length > 0 && (
           <div className="row" style={{ marginBottom: 10 }}>
             <div className="field" style={{ minWidth: 240 }}>
@@ -377,6 +398,8 @@ export default function Page() {
             <table>
               <thead>
                 <tr>
+                  {allExpirations && <th>Exp</th>}
+                  {allExpirations && <th title="Days to expiration">DTE</th>}
                   <th>Strike</th>
                   <th>%OTM</th>
                   <th>Mid</th>
@@ -396,6 +419,8 @@ export default function Page() {
               <tbody>
                 {rows.map(r => (
                   <tr key={r.contractSymbol} className={selected?.contractSymbol === r.contractSymbol ? "selected" : ""} onClick={() => setSelected(r)}>
+                    {allExpirations && <td>{dateStr(r.expiration)}</td>}
+                    {allExpirations && <td className="muted">{Math.round(r.T * 365)}</td>}
                     <td>{usd(r.strike)}</td>
                     <td>{pct(r.pctOTM)}</td>
                     <td>{usd(r.mid)}</td>
