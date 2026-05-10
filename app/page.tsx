@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { LEVERAGED_TICKERS } from "@/lib/tickers";
 import { bsCall, impliedVolCall, probSTAboveK } from "@/lib/blackScholes";
 import { simulate, SimResult } from "@/lib/simulator";
@@ -72,12 +72,14 @@ export default function Page() {
   const ticker = LEVERAGED_TICKERS.find(t => t.symbol === symbol);
   const leverage = ticker?.leverage ?? 3;
 
-  async function loadChain(sym: string, date?: number) {
+  async function loadChain(sym: string, date?: number, force = false) {
+    if (loading) return; // single-flight: ignore overlapping clicks
     setLoading(true); setErr(null);
     try {
       const url = new URL("/api/options", window.location.origin);
       url.searchParams.set("symbol", sym);
       if (date) url.searchParams.set("date", String(date));
+      if (force) url.searchParams.set("force", "1");
       const res = await fetch(url.toString());
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Failed to load");
@@ -91,13 +93,13 @@ export default function Page() {
     }
   }
 
-  useEffect(() => { loadChain(symbol); /* eslint-disable-next-line */ }, []);
+  // No auto-fetch on mount: spare the upstream API and avoid surprise rate-limits.
 
   function pickSymbol(sym: string) {
     setSymbol(sym);
     setSelected(null);
     setSimResult(null);
-    loadChain(sym);
+    setChain(null);   // clear stale chain so user explicitly chooses to load
   }
 
   function pickExp(ts: number) {
@@ -232,6 +234,19 @@ export default function Page() {
               {t.symbol} <span style={{ opacity: 0.7, fontWeight: 400 }}>({t.leverage}x)</span>
             </button>
           ))}
+        </div>
+        <div className="row" style={{ marginTop: 10 }}>
+          <button onClick={() => loadChain(symbol)} disabled={loading || manualMode}>
+            {loading ? "Loading…" : chain ? `Reload ${symbol} chain` : `Load ${symbol} chain`}
+          </button>
+          {chain && (
+            <button className="secondary" onClick={() => loadChain(symbol, expDate ?? undefined, true)} disabled={loading}>
+              Force refresh (skip cache)
+            </button>
+          )}
+          <div className="muted" style={{ alignSelf: "center", fontSize: 12 }}>
+            Chains are cached for 10 min server-side. Click a ticker, then load — no auto-fetching.
+          </div>
         </div>
         {ticker && (
           <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 12 }}>

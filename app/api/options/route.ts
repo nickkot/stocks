@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+// Cache responses on the Vercel edge for 10 min, serve stale up to 1h while revalidating.
+export const revalidate = 600;
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -175,33 +176,69 @@ export async function GET(req: NextRequest) {
   const symbol = (searchParams.get("symbol") || "SOXL").toUpperCase();
   const date = searchParams.get("date") || undefined;
   const debug = searchParams.get("debug") === "1";
+  const force = searchParams.get("force") === "1";
 
-  const tradierAvailable = !!process.env.TRADIER_TOKEN;
-  const errors: string[] = [];
+  const result = await getCachedChain(symbol, date, force);
 
-  if (tradierAvailable) {
-    try {
-      const out = await fetchTradier(symbol, date);
-      return NextResponse.json(debug ? out : { ...out, via: undefined });
-    } catch (e: any) {
-      errors.push(e.message);
-    }
+  if ("error" in result) {
+    return NextResponse.json(result, { status: 502 });
   }
-  try {
-    const out = await fetchYahoo(symbol, date);
-    return NextResponse.json(debug ? out : { ...out, via: undefined });
-  } catch (e: any) {
-    errors.push(e.message);
-  }
-
-  return NextResponse.json(
-    {
-      error: errors.join(" || "),
-      hint: tradierAvailable
-        ? "Tradier failed and Yahoo is rate-limiting Vercel. Check TRADIER_TOKEN/TRADIER_ENV env vars."
-        : "Yahoo Finance blocks Vercel egress (429). Set TRADIER_TOKEN env var (free sandbox key at https://developer.tradier.com) and redeploy, or use Manual mode in the UI.",
-      providers: { tradier: tradierAvailable, yahoo: true },
+  const body = debug ? result : { ...result, via: undefined };
+  return NextResponse.json(body, {
+    headers: {
+      // Browser: short. CDN: long. Stale-while-revalidate so the user never waits on Yahoo if we have any cached copy.
+      "Cache-Control": "public, max-age=30, s-maxage=600, stale-while-revalidate=86400",
     },
-    { status: 502 }
-  );
+  });
+}
+
+// ---------- Cache + single-flight ----------
+type CacheEntry = { at: number; data: OutChain };
+const CACHE = new Map<string, CacheEntry>();
+const INFLIGHT = new Map<string, Promise<OutChain>>();
+const TTL_MS = 10 * 60 * 1000;       // serve fresh for 10 min
+const STALE_MS = 24 * 60 * 60 * 1000; // serve stale for up to 24h on failure
+
+async function getCachedChain(
+  symbol: string,
+  date: string | undefined,
+  force: boolean
+): Promise<OutChain | { error: string; hint: string; providers: { tradier: boolean; yahoo: boolean }; stale?: OutChain }> {
+  const key = `${symbol}|${date ?? "first"}`;
+  const cached = CACHE.get(key);
+  if (!force && cached && Date.now() - cached.at < TTL_MS) return cached.data;
+
+  if (INFLIGHT.has(key)) {
+    try { return await INFLIGHT.get(key)!; } catch { /* fall through */ }
+  }
+
+  const fetchPromise = (async (): Promise<OutChain> => {
+    const tradierAvailable = !!process.env.TRADIER_TOKEN;
+    const errors: string[] = [];
+    if (tradierAvailable) {
+      try { return await fetchTradier(symbol, date); }
+      catch (e: any) { errors.push(e.message); }
+    }
+    try { return await fetchYahoo(symbol, date); }
+    catch (e: any) { errors.push(e.message); throw new Error(errors.join(" || ")); }
+  })();
+
+  INFLIGHT.set(key, fetchPromise);
+  try {
+    const data = await fetchPromise;
+    CACHE.set(key, { at: Date.now(), data });
+    return data;
+  } catch (e: any) {
+    // Serve stale data if we have any (even older than TTL) when upstream is failing.
+    if (cached && Date.now() - cached.at < STALE_MS) return cached.data;
+    return {
+      error: e?.message ?? "fetch failed",
+      hint: process.env.TRADIER_TOKEN
+        ? "Tradier failed and Yahoo is rate-limiting Vercel. Check TRADIER_TOKEN/TRADIER_ENV env vars."
+        : "Yahoo Finance returns 429 from Vercel egress. Set TRADIER_TOKEN env var (free at https://developer.tradier.com) and redeploy, or use Manual mode in the UI.",
+      providers: { tradier: !!process.env.TRADIER_TOKEN, yahoo: true },
+    };
+  } finally {
+    INFLIGHT.delete(key);
+  }
 }
