@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { LEVERAGED_TICKERS } from "@/lib/tickers";
-import { bsCall, impliedVolCall, probSTAboveK } from "@/lib/blackScholes";
+import { bsCall, impliedVolCall, probSTAboveK, probTouchUpperBarrier, spotForCallPrice } from "@/lib/blackScholes";
 import { simulate, SimResult } from "@/lib/simulator";
 
 type OptionRow = {
@@ -57,6 +57,7 @@ export default function Page() {
   const [contracts, setContracts] = useState(1);
   const [paths, setPaths] = useState(20000);
   const [targetMultiple, setTargetMultiple] = useState(100);
+  const [touchMultiple, setTouchMultiple] = useState(2);
 
   const [simResult, setSimResult] = useState<SimResult | null>(null);
   const [simRunning, setSimRunning] = useState(false);
@@ -133,7 +134,7 @@ export default function Page() {
   }, [chain, minOTM, maxOTM, minOI]);
 
   // Sort selector for the candidates table.
-  type SortKey = "leverageAtPlus100" | "leverageAtPlus50" | "moveToTarget" | "probTarget" | "cheapest" | "strike";
+  type SortKey = "leverageAtPlus100" | "leverageAtPlus50" | "moveToTarget" | "probTarget" | "probTouch" | "cheapest" | "strike";
   const [sortKey, setSortKey] = useState<SortKey>("leverageAtPlus100");
 
   // Decorate each row with derived metrics.
@@ -163,10 +164,17 @@ export default function Page() {
       const leverageAtPlus50 = payoffMult(0.5);
       const leverageAtPlus100 = payoffMult(1.0);
       const leverageAtPlus200 = payoffMult(2.0);
+      // Spot level needed today (at current IV/T) for the contract's mark to equal touchMultiple × premium.
+      const ivForTouch = iv > 0 ? iv : 0.5;
+      const barrier = spotForCallPrice(touchMultiple * c.mid, c.strike, T, riskFreeRate, ivForTouch);
+      const probTouchMult = Number.isFinite(barrier) && barrier > 0
+        ? probTouchUpperBarrier(chain.spot, barrier, T, muLev, sigmaLev)
+        : 0;
       return {
         ...c, T, iv, breakeven, priceForTarget, moveToTarget,
         probReachStrike, probReachTarget,
         leverageAtPlus50, leverageAtPlus100, leverageAtPlus200,
+        barrier, probTouchMult,
       };
     });
     const cmp: Record<SortKey, (a: any, b: any) => number> = {
@@ -174,11 +182,12 @@ export default function Page() {
       leverageAtPlus50:  (a, b) => b.leverageAtPlus50  - a.leverageAtPlus50,
       moveToTarget:      (a, b) => a.moveToTarget      - b.moveToTarget,
       probTarget:        (a, b) => b.probReachTarget   - a.probReachTarget,
+      probTouch:         (a, b) => b.probTouchMult     - a.probTouchMult,
       cheapest:          (a, b) => a.mid               - b.mid,
       strike:            (a, b) => a.strike            - b.strike,
     };
     return decorated.sort(cmp[sortKey]);
-  }, [filteredCalls, chain, riskFreeRate, targetMultiple, muAnnual, sigmaAnnual, leverage, expenseRatio, financingSpread, sortKey]);
+  }, [filteredCalls, chain, riskFreeRate, targetMultiple, touchMultiple, muAnnual, sigmaAnnual, leverage, expenseRatio, financingSpread, sortKey]);
 
   async function runSim() {
     setSimRunning(true);
@@ -334,13 +343,18 @@ export default function Page() {
             <div className="field" style={{ minWidth: 240 }}>
               <label>Sort by</label>
               <select value={sortKey} onChange={e => setSortKey(e.target.value as any)}>
+                <option value="probTouch">Highest P(touch {touchMultiple}x anytime)</option>
                 <option value="leverageAtPlus100">Highest leverage if {symbol} doubles (+100%)</option>
                 <option value="leverageAtPlus50">Highest leverage if {symbol} +50%</option>
-                <option value="probTarget">Highest P(hit {targetMultiple}x)</option>
+                <option value="probTarget">Highest P(hit {targetMultiple}x at expiry)</option>
                 <option value="moveToTarget">Smallest move needed for {targetMultiple}x</option>
                 <option value="cheapest">Cheapest premium</option>
                 <option value="strike">Strike (low → high)</option>
               </select>
+            </div>
+            <div className="field" style={{ minWidth: 140 }}>
+              <label>Touch multiple</label>
+              <input type="number" step="0.5" min="1.1" value={touchMultiple} onChange={e => setTouchMultiple(Math.max(1.1, Number(e.target.value)))} />
             </div>
           </div>
         )}
@@ -375,7 +389,8 @@ export default function Page() {
                   <th>Breakeven</th>
                   <th title={`Leveraged-ETF price at expiry needed to make this contract worth ${targetMultiple}x its premium`}>Price for {targetMultiple}x</th>
                   <th title={`Percent move in the leveraged ETF from today's spot needed to hit ${targetMultiple}x`}>Move to {targetMultiple}x</th>
-                  <th>P(hit {targetMultiple}x)</th>
+                  <th title={`Probability the option's mark hits ${touchMultiple}x its current premium at any point before expiry (you can sell anytime). Computed as first-passage probability of the underlying touching the spot level that prices the call at ${touchMultiple}x today, holding IV constant.`}>P(touch {touchMultiple}x)</th>
+                  <th>P(hit {targetMultiple}x at expiry)</th>
                 </tr>
               </thead>
               <tbody>
@@ -393,6 +408,7 @@ export default function Page() {
                     <td>{usd(r.breakeven)}</td>
                     <td>{usd(r.priceForTarget)}</td>
                     <td className={r.moveToTarget > 5 ? "warn" : "good"}>{pct(r.moveToTarget)}</td>
+                    <td className={r.probTouchMult > 0.05 ? "good" : "muted"}>{pct(r.probTouchMult, 2)}</td>
                     <td className={r.probReachTarget > 0.01 ? "good" : "muted"}>{pct(r.probReachTarget, 2)}</td>
                   </tr>
                 ))}
@@ -408,7 +424,8 @@ export default function Page() {
               <strong>Breakeven</strong> — strike + premium. If {symbol} is exactly here at expiry, you get back what you paid.<br/>
               <strong>Price for {targetMultiple}x</strong> — the {symbol} price at expiry that makes this contract worth <code>{targetMultiple} × premium</code>. Formula: <code>strike + {targetMultiple} × premium</code>.<br/>
               <strong>Move to {targetMultiple}x</strong> — that price expressed as a percent move from today's spot.<br/>
-              <strong>P(hit {targetMultiple}x)</strong> — closed-form probability the contract reaches {targetMultiple}x at expiry, under your assumed underlying drift μ and vol σ with leveraged-ETF volatility decay applied. Click a row for a full Monte Carlo.<br/>
+              <strong>P(touch {touchMultiple}x)</strong> — probability the contract's mark reaches <code>{touchMultiple} × premium</code> at <em>any</em> point before expiry, assuming you'd sell when it gets there. First-passage barrier is the spot level that prices the call at {touchMultiple}× today (Black-Scholes inversion holding IV constant); the closed form is the reflection-principle formula for GBM hitting an upper barrier with leveraged-ETF drift/vol. Always ≥ P(hit at expiry) since touch can happen earlier.<br/>
+              <strong>P(hit {targetMultiple}x at expiry)</strong> — probability the contract is worth ≥ {targetMultiple}× premium <em>at expiration</em> (intrinsic value only; no path-dependence). Lower than the touch probability for the same multiple. Click a row for a full Monte Carlo.<br/>
               <em>Trade-off:</em> the most-leveraged contracts (highest Mult @+200%) are usually the deepest OTM with the lowest probability — that's the whole point. Sort by leverage to find the lottery tickets, then run the simulator on the most realistic ones.
             </div>
           </details>

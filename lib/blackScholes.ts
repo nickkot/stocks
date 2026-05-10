@@ -46,3 +46,33 @@ export function probSTAboveK(S: number, K: number, T: number, mu: number, sigma:
   const d2 = (Math.log(S / K) + (mu - 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
   return normCdf(d2);
 }
+
+// First-passage probability that GBM(S, μ, σ) ever touches an upper barrier B during [0, T].
+// Reflection-principle closed form. Returns 1 if S already ≥ B.
+export function probTouchUpperBarrier(S: number, B: number, T: number, mu: number, sigma: number): number {
+  if (S >= B) return 1;
+  if (T <= 0 || sigma <= 0) return 0;
+  const nu = mu - 0.5 * sigma * sigma;
+  const b = Math.log(B / S);
+  const sqT = sigma * Math.sqrt(T);
+  const term1 = normCdf((nu * T - b) / sqT);
+  const term2 = Math.exp((2 * nu * b) / (sigma * sigma)) * normCdf((-nu * T - b) / sqT);
+  return Math.min(1, Math.max(0, term1 + term2));
+}
+
+// Inverse of bsCall: find the spot price that makes the call worth `targetPrice` today,
+// holding T, sigma, r constant. Bisection on [K*0.01, K*100]. Returns NaN if not bracketed.
+export function spotForCallPrice(targetPrice: number, K: number, T: number, r: number, sigma: number, q = 0): number {
+  if (targetPrice <= 0) return 0;
+  let lo = K * 0.01;
+  let hi = K * 100;
+  const f = (S: number) => bsCall(S, K, T, r, sigma, q) - targetPrice;
+  if (f(lo) > 0) return lo;
+  if (f(hi) < 0) return NaN;
+  for (let i = 0; i < 80; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (f(mid) > 0) hi = mid; else lo = mid;
+    if (hi - lo < 1e-4) break;
+  }
+  return 0.5 * (lo + hi);
+}
