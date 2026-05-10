@@ -78,7 +78,7 @@ export default function Page() {
 
   const [minOTM, setMinOTM] = useState(10);   // %
   const [maxOTM, setMaxOTM] = useState(300);  // %
-  const [minOI, setMinOI] = useState(100);
+  const [minOI, setMinOI] = useState(10);
   const [minVolume, setMinVolume] = useState(0);
   const [maxSpreadPct, setMaxSpreadPct] = useState(50); // (ask-bid)/mid in percent
   const [requireBid, setRequireBid] = useState(true);
@@ -416,7 +416,7 @@ export default function Page() {
           </div>
         </div>
         <div className="panel">
-          <h2>Filter <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>(liquidity defaults: OI ≥ 100, bid &gt; 0, spread ≤ 50%)</span></h2>
+          <h2>Filter <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>(liquidity defaults: OI ≥ 10, bid &gt; 0, spread ≤ 50%)</span></h2>
           <div className="grid cols-2" style={{ gap: 12 }}>
             <SliderField label="Min %OTM" value={minOTM} onChange={setMinOTM} min={0} max={500} step={5} suffix="%" />
             <SliderField label="Max %OTM" value={maxOTM} onChange={setMaxOTM} min={50} max={2000} step={25} suffix="%" />
@@ -432,7 +432,7 @@ export default function Page() {
             </div>
           </div>
           <div className="row" style={{ marginTop: 6 }}>
-            <button className="secondary" onClick={() => { setMinOI(100); setMinVolume(0); setMaxSpreadPct(50); setRequireBid(true); }}>
+            <button className="secondary" onClick={() => { setMinOI(10); setMinVolume(0); setMaxSpreadPct(50); setRequireBid(true); }}>
               Liquidity defaults
             </button>
             <button className="secondary" onClick={() => { setMinOI(500); setMinVolume(10); setMaxSpreadPct(25); setRequireBid(true); }}>
@@ -526,7 +526,7 @@ export default function Page() {
                     <td>{usd(r.mid)}</td>
                     <td className="muted">{fmt(r.bid)} / {fmt(r.ask)}</td>
                     <td>{pct(r.iv)}</td>
-                    <td className={r.openInterest >= 500 ? "good" : r.openInterest >= 100 ? "" : "warn"}>{r.openInterest}</td>
+                    <td className={r.openInterest >= 100 ? "good" : r.openInterest >= 10 ? "" : "warn"}>{r.openInterest}</td>
                     <td className="muted">{r.volume}</td>
                     <td className={(() => { const s = spreadPctOf(r); return s <= 10 ? "good" : s <= 25 ? "" : "warn"; })()}>
                       {(() => { const s = spreadPctOf(r); return Number.isFinite(s) ? `${s.toFixed(0)}%` : "—"; })()}
