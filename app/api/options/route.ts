@@ -100,6 +100,82 @@ async function fetchTradier(symbol: string, dateStr?: string): Promise<OutChain>
   };
 }
 
+// ---------- CBOE (free, public, ~15 min delayed, no signup) ----------
+// Endpoint: https://cdn.cboe.com/api/global/delayed_quotes/options/<SYMBOL>.json
+// Some symbols live under /api/global/delayed_quotes/options/_<SYMBOL>.json (indices etc.)
+
+function parseOcc(occ: string): { root: string; expiration: number; type: "C" | "P"; strike: number } | null {
+  if (occ.length < 16) return null;
+  const root = occ.slice(0, occ.length - 15);
+  const yy = parseInt(occ.slice(-15, -13));
+  const mm = parseInt(occ.slice(-13, -11));
+  const dd = parseInt(occ.slice(-11, -9));
+  const type = occ.slice(-9, -8) as "C" | "P";
+  const strikeRaw = parseInt(occ.slice(-8));
+  if (![2025, 2026, 2027, 2028, 2029, 2030].includes(2000 + yy) && yy < 25) {
+    // not strictly necessary, just skip clearly broken symbols
+  }
+  const epoch = Math.floor(Date.UTC(2000 + yy, mm - 1, dd, 20, 0, 0) / 1000);
+  return { root, expiration: epoch, type, strike: strikeRaw / 1000 };
+}
+
+async function fetchCboe(symbol: string, dateEpoch?: string): Promise<OutChain> {
+  const tryPaths = [
+    `https://cdn.cboe.com/api/global/delayed_quotes/options/${encodeURIComponent(symbol)}.json`,
+    `https://cdn.cboe.com/api/global/delayed_quotes/options/_${encodeURIComponent(symbol)}.json`,
+  ];
+  let json: any = null;
+  let lastErr = "";
+  for (const url of tryPaths) {
+    const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" } });
+    if (res.ok) { json = await res.json(); break; }
+    lastErr = `cboe ${res.status} ${url}`;
+  }
+  if (!json) throw new Error(lastErr || "cboe: no data");
+
+  const d = json.data ?? json;
+  const spot = d.current_price ?? d.close ?? d.last_trade_price ?? d.bid ?? 0;
+  const shortName = d.security_name ?? d.symbol ?? symbol;
+  const options: any[] = d.options ?? [];
+
+  // Group calls by expiration epoch
+  const byExp = new Map<number, OutOption[]>();
+  for (const o of options) {
+    const occ: string = o.option ?? o.symbol;
+    const parsed = parseOcc(occ);
+    if (!parsed || parsed.type !== "C") continue;
+    const bid = Number(o.bid ?? 0);
+    const ask = Number(o.ask ?? 0);
+    const last = Number(o.last_trade_price ?? o.last ?? 0);
+    const mid = bid && ask ? (bid + ask) / 2 : last;
+    const row: OutOption = {
+      contractSymbol: occ,
+      strike: parsed.strike,
+      bid, ask, last, mid,
+      volume: Number(o.volume ?? 0),
+      openInterest: Number(o.open_interest ?? 0),
+      impliedVolatility: Number(o.iv ?? 0),
+      inTheMoney: spot > parsed.strike,
+      pctOTM: spot > 0 ? (parsed.strike - spot) / spot : 0,
+      expiration: parsed.expiration,
+    };
+    if (!byExp.has(parsed.expiration)) byExp.set(parsed.expiration, []);
+    byExp.get(parsed.expiration)!.push(row);
+  }
+
+  const expirations = [...byExp.keys()].sort((a, b) => a - b);
+  if (!expirations.length) throw new Error("cboe: no call options parsed");
+  const chosen = dateEpoch ? Number(dateEpoch) : expirations[0];
+  const calls = (byExp.get(chosen) ?? byExp.get(expirations[0])!).sort((a, b) => a.strike - b.strike);
+
+  return {
+    symbol, shortName, spot, expirations,
+    selectedExpiration: chosen,
+    calls,
+    via: "cboe",
+  };
+}
+
 // ---------- Yahoo (works locally, blocked on Vercel) ----------
 let session: { cookie: string; crumb: string; createdAt: number } | null = null;
 async function getYahooSession(force = false) {
@@ -217,8 +293,10 @@ async function getCachedChain(
     const errors: string[] = [];
     if (tradierAvailable) {
       try { return await fetchTradier(symbol, date); }
-      catch (e: any) { errors.push(e.message); }
+      catch (e: any) { errors.push(`tradier: ${e.message}`); }
     }
+    try { return await fetchCboe(symbol, date); }
+    catch (e: any) { errors.push(e.message); }
     try { return await fetchYahoo(symbol, date); }
     catch (e: any) { errors.push(e.message); throw new Error(errors.join(" || ")); }
   })();
