@@ -42,7 +42,7 @@ export default function Page() {
   const [err, setErr] = useState<string | null>(null);
   const [expDate, setExpDate] = useState<number | null>(null);
 
-  const [minOTM, setMinOTM] = useState(30);   // %
+  const [minOTM, setMinOTM] = useState(10);   // %
   const [maxOTM, setMaxOTM] = useState(300);  // %
   const [minOI, setMinOI] = useState(100);
   const [minVolume, setMinVolume] = useState(0);
