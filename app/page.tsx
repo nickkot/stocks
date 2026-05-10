@@ -35,6 +35,40 @@ const pct = (n: number, d = 1) => (Number.isFinite(n) ? `${(n * 100).toFixed(d)}
 const usd = (n: number) => (Number.isFinite(n) ? `$${fmt(n)}` : "—");
 const dateStr = (epoch: number) => new Date(epoch * 1000).toISOString().slice(0, 10);
 
+function SliderField({ label, value, onChange, min, max, step, suffix, title }: {
+  label: string; value: number; onChange: (v: number) => void;
+  min: number; max: number; step: number; suffix?: string; title?: string;
+}) {
+  const clamp = (v: number) => Math.max(min, Math.min(max, v));
+  return (
+    <div className="field" title={title} style={{ display: "block" }}>
+      <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>{label}</span>
+        <input
+          type="number"
+          value={value}
+          onChange={e => onChange(Number(e.target.value))}
+          step={step}
+          style={{ width: 80, padding: "2px 6px", fontSize: 12, textAlign: "right" }}
+        />
+      </label>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={clamp(value)}
+        onChange={e => onChange(Number(e.target.value))}
+        style={{ width: "100%", marginTop: 4 }}
+      />
+      <div className="muted" style={{ fontSize: 10, display: "flex", justifyContent: "space-between" }}>
+        <span>{min}{suffix}</span>
+        <span>{max}{suffix}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function Page() {
   const [symbol, setSymbol] = useState("SOXL");
   const [chain, setChain] = useState<ChainResp | null>(null);
@@ -365,18 +399,12 @@ export default function Page() {
         </div>
         <div className="panel">
           <h2>Filter <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>(liquidity defaults: OI ≥ 100, bid &gt; 0, spread ≤ 50%)</span></h2>
-          <div className="row">
-            <div className="field"><label>Min %OTM</label><input type="number" value={minOTM} onChange={e => setMinOTM(Number(e.target.value))} /></div>
-            <div className="field"><label>Max %OTM</label><input type="number" value={maxOTM} onChange={e => setMaxOTM(Number(e.target.value))} /></div>
-            <div className="field" title="Open interest = number of contracts outstanding. Higher = more liquid.">
-              <label>Min OI</label><input type="number" value={minOI} onChange={e => setMinOI(Number(e.target.value))} />
-            </div>
-            <div className="field" title="Today's traded volume. 0 = ignore.">
-              <label>Min volume</label><input type="number" value={minVolume} onChange={e => setMinVolume(Number(e.target.value))} />
-            </div>
-            <div className="field" title="Max bid/ask spread as % of mid. Wider = harder to exit at fair value.">
-              <label>Max spread %</label><input type="number" value={maxSpreadPct} onChange={e => setMaxSpreadPct(Number(e.target.value))} />
-            </div>
+          <div className="grid cols-2" style={{ gap: 12 }}>
+            <SliderField label="Min %OTM" value={minOTM} onChange={setMinOTM} min={0} max={500} step={5} suffix="%" />
+            <SliderField label="Max %OTM" value={maxOTM} onChange={setMaxOTM} min={50} max={2000} step={25} suffix="%" />
+            <SliderField label="Min OI" value={minOI} onChange={setMinOI} min={0} max={2000} step={25} title="Open interest = contracts outstanding. Higher = more liquid." />
+            <SliderField label="Min volume" value={minVolume} onChange={setMinVolume} min={0} max={500} step={5} title="Today's traded volume. 0 = ignore." />
+            <SliderField label="Max spread %" value={maxSpreadPct} onChange={setMaxSpreadPct} min={5} max={200} step={5} suffix="%" title="Max bid/ask spread as % of mid. Wider = harder to exit at fair value." />
             <div className="field" style={{ minWidth: 140 }}>
               <label>Require bid &gt; 0</label>
               <select value={requireBid ? "1" : "0"} onChange={e => setRequireBid(e.target.value === "1")}>
