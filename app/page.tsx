@@ -542,14 +542,49 @@ export default function Page() {
 
           <div style={{ marginTop: 16 }}>
             <h2>Distribution of payoff multiples</h2>
-            <div className="histbar">
-              {simResult.histogram.map(h => (
-                <div key={h.bucket} className="bar" data-tip={`${h.bucket}: ${h.count}`} style={{ height: `${(h.count / maxHist) * 100}%` }} />
-              ))}
-            </div>
-            <div className="histlabels">
-              {simResult.histogram.map(h => <span key={h.bucket}>{h.bucket}</span>)}
-            </div>
+            {(() => {
+              const totalCount = simResult.histogram.reduce((s, h) => s + h.count, 0) || 1;
+              let cum = 0;
+              const withPct = simResult.histogram.map(h => {
+                const pctOf = h.count / totalCount;
+                cum += pctOf;
+                return { ...h, pctOf, cum };
+              });
+              return (
+                <>
+                  <div className="histbar">
+                    {withPct.map(h => (
+                      <div
+                        key={h.bucket}
+                        className="bar"
+                        data-tip={`${h.bucket}: ${h.count.toLocaleString()} paths · ${pct(h.pctOf, 1)} · cum ${pct(h.cum, 1)}`}
+                        style={{ height: `${(h.count / maxHist) * 100}%` }}
+                      >
+                        {h.pctOf >= 0.02 && (
+                          <span style={{
+                            position: "absolute", bottom: "100%", left: "50%", transform: "translateX(-50%)",
+                            fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap", paddingBottom: 2,
+                          }}>{pct(h.pctOf, 0)}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="histlabels">
+                    {withPct.map(h => <span key={h.bucket}>{h.bucket}</span>)}
+                  </div>
+                  <div className="histlabels" style={{ marginTop: 2 }}>
+                    {withPct.map(h => (
+                      <span key={h.bucket} style={{ color: h.pctOf >= 0.001 ? "var(--text)" : "var(--muted)" }}>
+                        {h.pctOf >= 0.0001 ? pct(h.pctOf, h.pctOf < 0.01 ? 2 : 1) : "—"}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+                    {totalCount.toLocaleString()} simulated paths · bucket label = payoff multiple range · second row = % of paths in that bucket. Hover a bar for cumulative %.
+                  </div>
+                </>
+              );
+            })()}
           </div>
 
           <div className="warningbox" style={{ marginTop: 16 }}>
