@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { LEVERAGED_TICKERS } from "@/lib/tickers";
-import { bsCall, impliedVolCall, probSTAboveK, probTouchUpperBarrier, spotForCallPrice, buildIvSurface, IvSurface } from "@/lib/blackScholes";
+import { bsCall, bsPut, impliedVolCall, impliedVolPut, probSTAboveK, probTouchUpperBarrier, probTouchLowerBarrier, spotForCallPrice, spotForPutPrice, buildIvSurface, IvSurface } from "@/lib/blackScholes";
 import { simulate, SimResult } from "@/lib/simulator";
 
 type OptionRow = {
@@ -18,6 +18,7 @@ type OptionRow = {
   inTheMoney: boolean;
   pctOTM: number;
   expiration: number;
+  side: "C" | "P";
 };
 
 type ChainResp = {
@@ -26,6 +27,7 @@ type ChainResp = {
   spot: number;
   expirations: number[];
   selectedExpiration: number;
+  puts: OptionRow[];
   calls: OptionRow[];
   error?: string;
 };
@@ -157,30 +159,39 @@ export default function Page() {
     return ((c.ask - c.bid) / c.mid) * 100;
   };
 
+  const [sideFilter, setSideFilter] = useState<"both" | "C" | "P">("C");
+
+  const allContracts = useMemo(() => {
+    if (!chain) return [] as OptionRow[];
+    return [...(chain.calls ?? []), ...(chain.puts ?? [])];
+  }, [chain]);
+
   const filteredCalls = useMemo(() => {
     if (!chain) return [];
-    return chain.calls
+    return allContracts
+      .filter(c => sideFilter === "both" || c.side === sideFilter)
       .filter(c => c.pctOTM * 100 >= minOTM && c.pctOTM * 100 <= maxOTM)
       .filter(c => (c.openInterest ?? 0) >= minOI)
       .filter(c => (c.volume ?? 0) >= minVolume)
       .filter(c => !requireBid || c.bid > 0)
       .filter(c => spreadPctOf(c) <= maxSpreadPct)
-      .sort((a, b) => a.strike - b.strike);
-  }, [chain, minOTM, maxOTM, minOI, minVolume, requireBid, maxSpreadPct]);
+      .sort((a, b) => a.expiration - b.expiration || a.strike - b.strike);
+  }, [chain, allContracts, sideFilter, minOTM, maxOTM, minOI, minVolume, requireBid, maxSpreadPct]);
 
   // Diagnostics for the empty state.
   const filterDiag = useMemo(() => {
     if (!chain) return null;
-    const total = chain.calls.length;
-    const otmPass = chain.calls.filter(c => c.pctOTM * 100 >= minOTM && c.pctOTM * 100 <= maxOTM).length;
-    const oiPass = chain.calls.filter(c => (c.openInterest ?? 0) >= minOI).length;
-    const volPass = chain.calls.filter(c => (c.volume ?? 0) >= minVolume).length;
-    const bidPass = chain.calls.filter(c => c.bid > 0).length;
-    const spreadPass = chain.calls.filter(c => spreadPctOf(c) <= maxSpreadPct).length;
-    const minOTMActual = total ? Math.min(...chain.calls.map(c => c.pctOTM * 100)) : 0;
-    const maxOTMActual = total ? Math.max(...chain.calls.map(c => c.pctOTM * 100)) : 0;
+    const pool = allContracts.filter(c => sideFilter === "both" || c.side === sideFilter);
+    const total = pool.length;
+    const otmPass = pool.filter(c => c.pctOTM * 100 >= minOTM && c.pctOTM * 100 <= maxOTM).length;
+    const oiPass = pool.filter(c => (c.openInterest ?? 0) >= minOI).length;
+    const volPass = pool.filter(c => (c.volume ?? 0) >= minVolume).length;
+    const bidPass = pool.filter(c => c.bid > 0).length;
+    const spreadPass = pool.filter(c => spreadPctOf(c) <= maxSpreadPct).length;
+    const minOTMActual = total ? Math.min(...pool.map(c => c.pctOTM * 100)) : 0;
+    const maxOTMActual = total ? Math.max(...pool.map(c => c.pctOTM * 100)) : 0;
     return { total, otmPass, oiPass, volPass, bidPass, spreadPass, minOTMActual, maxOTMActual };
-  }, [chain, minOTM, maxOTM, minOI, minVolume, maxSpreadPct]);
+  }, [chain, allContracts, sideFilter, minOTM, maxOTM, minOI, minVolume, maxSpreadPct]);
 
   // Sort selector for the candidates table.
   type SortKey = "leverageAtPlus100" | "leverageAtPlus50" | "moveToTarget" | "probTarget" | "probTouch" | "probTouch2" | "probTouch3" | "probTouch5" | "probTouch10" | "cheapest" | "strike";
@@ -195,30 +206,49 @@ export default function Page() {
       - 0.5 * leverage * (leverage - 1) * sigmaAnnual * sigmaAnnual;
     const sigmaLev = leverage * sigmaAnnual;
     const decorated = filteredCalls.map(c => {
+      const isPut = c.side === "P";
       const T = Math.max(1 / 365, (c.expiration - now) / (365 * 86400));
       const iv = c.impliedVolatility && c.impliedVolatility > 0
         ? c.impliedVolatility
-        : impliedVolCall(c.mid, chain.spot, c.strike, T, riskFreeRate);
-      const breakeven = c.strike + c.mid;
-      const priceForTarget = c.strike + c.mid * targetMultiple;
-      const moveToTarget = priceForTarget / chain.spot - 1;
-      const probReachStrike = probSTAboveK(chain.spot, c.strike, T, muLev, sigmaLev);
-      const probReachTarget = probSTAboveK(chain.spot, priceForTarget, T, muLev, sigmaLev);
-      // Leverage = payoff multiple at expiry given a fixed move in the leveraged ETF (intrinsic only).
+        : (isPut ? impliedVolPut : impliedVolCall)(c.mid, chain.spot, c.strike, T, riskFreeRate);
+      const breakeven = isPut ? Math.max(0, c.strike - c.mid) : c.strike + c.mid;
+      const priceForTarget = isPut
+        ? Math.max(0, c.strike - c.mid * targetMultiple)
+        : c.strike + c.mid * targetMultiple;
+      const moveToTarget = priceForTarget / chain.spot - 1; // negative for puts
+      const probReachStrike = isPut
+        ? 1 - probSTAboveK(chain.spot, c.strike, T, muLev, sigmaLev)
+        : probSTAboveK(chain.spot, c.strike, T, muLev, sigmaLev);
+      const probReachTarget = isPut
+        ? 1 - probSTAboveK(chain.spot, priceForTarget, T, muLev, sigmaLev)
+        : probSTAboveK(chain.spot, priceForTarget, T, muLev, sigmaLev);
+      // Leverage = payoff multiple at expiry given a |movePct| favorable move in the leveraged ETF.
+      // Calls: spot rises by movePct. Puts: spot falls by movePct (capped so price ≥ 0).
       const payoffMult = (movePct: number) => {
-        const finalPrice = chain.spot * (1 + movePct);
-        const intrinsic = Math.max(0, finalPrice - c.strike);
-        return c.mid > 0 ? intrinsic / c.mid : 0;
+        if (c.mid <= 0) return 0;
+        const finalPrice = isPut
+          ? Math.max(0, chain.spot * (1 - movePct))
+          : chain.spot * (1 + movePct);
+        const intrinsic = isPut
+          ? Math.max(0, c.strike - finalPrice)
+          : Math.max(0, finalPrice - c.strike);
+        return intrinsic / c.mid;
       };
       const leverageAtPlus50 = payoffMult(0.5);
       const leverageAtPlus100 = payoffMult(1.0);
       const leverageAtPlus200 = payoffMult(2.0);
-      // Spot level needed today (at current IV/T) for the contract's mark to equal N × premium.
+      // First-passage barrier touch — upper for calls, lower for puts.
       const ivForTouch = iv > 0 ? iv : 0.5;
       const probTouchAt = (mult: number) => {
         if (c.mid <= 0 || mult <= 1) return 0;
+        if (isPut) {
+          const B = spotForPutPrice(mult * c.mid, c.strike, T, riskFreeRate, ivForTouch);
+          return Number.isFinite(B) && B > 0 && B < chain.spot
+            ? probTouchLowerBarrier(chain.spot, B, T, muLev, sigmaLev)
+            : 0;
+        }
         const B = spotForCallPrice(mult * c.mid, c.strike, T, riskFreeRate, ivForTouch);
-        return Number.isFinite(B) && B > 0
+        return Number.isFinite(B) && B > chain.spot
           ? probTouchUpperBarrier(chain.spot, B, T, muLev, sigmaLev)
           : 0;
       };
@@ -260,25 +290,29 @@ export default function Page() {
     const days = useManual
       ? Math.max(1, mDays)
       : Math.max(1, Math.round((selected!.expiration - Date.now() / 1000) / 86400));
+    const side: "C" | "P" = useManual ? "C" : (selected!.side ?? "C");
     const iv = useManual
       ? mIV
       : selected!.impliedVolatility && selected!.impliedVolatility > 0
         ? selected!.impliedVolatility
-        : impliedVolCall(premium, spotPrice, strike, days / 365, riskFreeRate);
-    // Build a term-structure-aware IV surface from the loaded chain when we have multi-expiry data.
+        : (side === "P" ? impliedVolPut : impliedVolCall)(premium, spotPrice, strike, days / 365, riskFreeRate);
+    // Build a term-structure-aware IV surface from the loaded chain. Use the same-side contracts (puts use put IVs).
     let ivSurface: IvSurface | undefined;
     let surfaceSamples = 0;
-    if (!useManual && chain && chain.calls.length >= 12) {
-      const now = Date.now() / 1000;
-      const samples = chain.calls
-        .filter(c => c.impliedVolatility > 0.01 && c.impliedVolatility < 5 && c.strike > 0 && spotPrice > 0)
-        .map(c => ({
-          T: Math.max(1 / 365, (c.expiration - now) / (365 * 86400)),
-          lnM: Math.log(c.strike / spotPrice),
-          iv: c.impliedVolatility,
-        }));
-      const built = buildIvSurface(samples);
-      if (built) { ivSurface = built; surfaceSamples = samples.length; }
+    if (!useManual && chain) {
+      const sameSide = side === "P" ? (chain.puts ?? []) : (chain.calls ?? []);
+      if (sameSide.length >= 12) {
+        const now = Date.now() / 1000;
+        const samples = sameSide
+          .filter(c => c.impliedVolatility > 0.01 && c.impliedVolatility < 5 && c.strike > 0 && spotPrice > 0)
+          .map(c => ({
+            T: Math.max(1 / 365, (c.expiration - now) / (365 * 86400)),
+            lnM: Math.log(c.strike / spotPrice),
+            iv: c.impliedVolatility,
+          }));
+        const built = buildIvSurface(samples);
+        if (built) { ivSurface = built; surfaceSamples = samples.length; }
+      }
     }
     const result = simulate({
       spotUnderlying: spotPrice,
@@ -297,6 +331,7 @@ export default function Page() {
       paths,
       targetMultiple,
       ivSurface,
+      side,
     });
     setSimResult(result);
     setSimSurfaceInfo(ivSurface ? `term-structure (${surfaceSamples} chain samples)` : "constant IV");
@@ -417,6 +452,19 @@ export default function Page() {
         </div>
         <div className="panel">
           <h2>Filter <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>(liquidity defaults: OI ≥ 10, bid &gt; 0, spread ≤ 50%)</span></h2>
+          <div className="row" style={{ marginBottom: 8 }}>
+            <div className="field" style={{ minWidth: 220 }}>
+              <label>Side</label>
+              <select value={sideFilter} onChange={e => setSideFilter(e.target.value as any)}>
+                <option value="C">Calls only (bullish)</option>
+                <option value="P">Puts only (bearish)</option>
+                <option value="both">Both (calls + puts unified)</option>
+              </select>
+            </div>
+            <div className="muted" style={{ alignSelf: "center", fontSize: 12 }}>
+              {chain && `${chain.calls?.length ?? 0} calls · ${chain.puts?.length ?? 0} puts in chain`}
+            </div>
+          </div>
           <div className="grid cols-2" style={{ gap: 12 }}>
             <SliderField label="Min %OTM" value={minOTM} onChange={setMinOTM} min={0} max={500} step={5} suffix="%" />
             <SliderField label="Max %OTM" value={maxOTM} onChange={setMaxOTM} min={50} max={2000} step={25} suffix="%" />
@@ -492,6 +540,7 @@ export default function Page() {
             <table>
               <thead>
                 <tr>
+                  {sideFilter === "both" && <th>Side</th>}
                   {allExpirations && <th>Exp</th>}
                   {allExpirations && <th title="Days to expiration">DTE</th>}
                   <th>Strike</th>
@@ -502,9 +551,9 @@ export default function Page() {
                   <th>OI</th>
                   <th title="Today's traded volume">Vol</th>
                   <th title="Bid/ask spread as % of mid (lower = more liquid)">Spread</th>
-                  <th title="Payoff multiple at expiry if the leveraged ETF moves +50%">Mult @+50%</th>
-                  <th title="Payoff multiple at expiry if the leveraged ETF doubles (+100%)">Mult @+100%</th>
-                  <th title="Payoff multiple at expiry if the leveraged ETF triples (+200%)">Mult @+200%</th>
+                  <th title="Payoff multiple at expiry given a 50% favorable move (calls: +50% spot, puts: −50% spot)">Mult @50%</th>
+                  <th title="Payoff multiple at expiry given a 100% favorable move (calls: spot doubles, puts: spot → 0)">Mult @100%</th>
+                  <th title="Payoff multiple at expiry given a 200% favorable move (calls: spot triples, puts: capped at spot=0)">Mult @200%</th>
                   <th>Breakeven</th>
                   <th title={`Leveraged-ETF price at expiry needed to make this contract worth ${targetMultiple}x its premium`}>Price for {targetMultiple}x</th>
                   <th title={`Percent move in the leveraged ETF from today's spot needed to hit ${targetMultiple}x`}>Move to {targetMultiple}x</th>
@@ -519,6 +568,7 @@ export default function Page() {
               <tbody>
                 {rows.map(r => (
                   <tr key={r.contractSymbol} className={selected?.contractSymbol === r.contractSymbol ? "selected" : ""} onClick={() => setSelected(r)}>
+                    {sideFilter === "both" && <td className={r.side === "P" ? "warn" : "good"}>{r.side === "P" ? "PUT" : "CALL"}</td>}
                     {allExpirations && <td>{dateStr(r.expiration)}</td>}
                     {allExpirations && <td className="muted">{Math.round(r.T * 365)}</td>}
                     <td>{usd(r.strike)}</td>

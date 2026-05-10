@@ -25,6 +25,14 @@ export function bsCall(S: number, K: number, T: number, r: number, sigma: number
   return S * Math.exp(-q * T) * normCdf(d1) - K * Math.exp(-r * T) * normCdf(d2);
 }
 
+export function bsPut(S: number, K: number, T: number, r: number, sigma: number, q = 0): number {
+  if (T <= 0) return Math.max(0, K - S);
+  if (sigma <= 0) return Math.max(0, K * Math.exp(-r * T) - S * Math.exp(-q * T));
+  const d1 = (Math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+  const d2 = d1 - sigma * Math.sqrt(T);
+  return K * Math.exp(-r * T) * normCdf(-d2) - S * Math.exp(-q * T) * normCdf(-d1);
+}
+
 // Implied vol via bisection on a call price.
 export function impliedVolCall(price: number, S: number, K: number, T: number, r: number, q = 0): number {
   if (price <= 0 || T <= 0) return 0;
@@ -33,6 +41,20 @@ export function impliedVolCall(price: number, S: number, K: number, T: number, r
   for (let i = 0; i < 80; i++) {
     const mid = (lo + hi) / 2;
     const p = bsCall(S, K, T, r, mid, q);
+    if (p > price) hi = mid;
+    else lo = mid;
+    if (hi - lo < 1e-5) break;
+  }
+  return (lo + hi) / 2;
+}
+
+export function impliedVolPut(price: number, S: number, K: number, T: number, r: number, q = 0): number {
+  if (price <= 0 || T <= 0) return 0;
+  let lo = 1e-4;
+  let hi = 5;
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    const p = bsPut(S, K, T, r, mid, q);
     if (p > price) hi = mid;
     else lo = mid;
     if (hi - lo < 1e-5) break;
@@ -57,6 +79,19 @@ export function probTouchUpperBarrier(S: number, B: number, T: number, mu: numbe
   const sqT = sigma * Math.sqrt(T);
   const term1 = normCdf((nu * T - b) / sqT);
   const term2 = Math.exp((2 * nu * b) / (sigma * sigma)) * normCdf((-nu * T - b) / sqT);
+  return Math.min(1, Math.max(0, term1 + term2));
+}
+
+// First-passage probability that GBM(S, μ, σ) ever touches a lower barrier B (B < S) during [0, T].
+export function probTouchLowerBarrier(S: number, B: number, T: number, mu: number, sigma: number): number {
+  if (B <= 0) return 0;
+  if (S <= B) return 1;
+  if (T <= 0 || sigma <= 0) return 0;
+  const nu = mu - 0.5 * sigma * sigma;
+  const b = Math.log(B / S); // negative
+  const sqT = sigma * Math.sqrt(T);
+  const term1 = normCdf((b - nu * T) / sqT);
+  const term2 = Math.exp((2 * nu * b) / (sigma * sigma)) * normCdf((b + nu * T) / sqT);
   return Math.min(1, Math.max(0, term1 + term2));
 }
 
@@ -137,6 +172,30 @@ export function spotForCallPrice(targetPrice: number, K: number, T: number, r: n
   for (let i = 0; i < 80; i++) {
     const mid = 0.5 * (lo + hi);
     if (f(mid) > 0) hi = mid; else lo = mid;
+    if (hi - lo < 1e-4) break;
+  }
+  return 0.5 * (lo + hi);
+}
+
+// Inverse of bsPut: spot S* such that bsPut(S*, K, T, sigma, r) = targetPrice. Put price is monotonically
+// decreasing in S, so we bisect with f(S) = targetPrice - bsPut(S). Lower S → higher put price.
+export function spotForPutPrice(targetPrice: number, K: number, T: number, r: number, sigma: number, q = 0): number {
+  if (targetPrice <= 0) return K;
+  let lo = 1e-4;
+  let hi = K;
+  // At lo, put ≈ K (max value); at hi (= K), put price equals BS-ATM put. If targetPrice > BS at lo, infeasible.
+  const fLo = bsPut(lo, K, T, r, sigma, q) - targetPrice; // ≥ 0 expected
+  if (fLo < 0) return NaN; // not even the deepest ITM put hits the target
+  if (bsPut(hi, K, T, r, sigma, q) - targetPrice >= 0) {
+    // need to extend hi until put < target
+    let cap = K * 5;
+    while (bsPut(cap, K, T, r, sigma, q) - targetPrice >= 0 && cap < K * 1e4) cap *= 2;
+    hi = cap;
+  }
+  for (let i = 0; i < 80; i++) {
+    const mid = 0.5 * (lo + hi);
+    const v = bsPut(mid, K, T, r, sigma, q);
+    if (v > targetPrice) lo = mid; else hi = mid;
     if (hi - lo < 1e-4) break;
   }
   return 0.5 * (lo + hi);

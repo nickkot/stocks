@@ -9,6 +9,7 @@ const UA =
 
 type OutOption = {
   contractSymbol: string;
+  side: "C" | "P";
   strike: number;
   bid: number;
   ask: number;
@@ -29,6 +30,7 @@ type OutChain = {
   expirations: number[];
   selectedExpiration: number;
   calls: OutOption[];
+  puts: OutOption[];
   via: string;
 };
 
@@ -72,22 +74,24 @@ async function fetchTradier(symbol: string, dateStr?: string, allExpirations = f
     const last = o.last ?? 0;
     const mid = bid && ask ? (bid + ask) / 2 : last;
     const expEpoch = Math.floor(new Date(o.expiration_date + "T20:00:00Z").getTime() / 1000);
+    const side: "C" | "P" = o.option_type === "put" ? "P" : "C";
     return {
       contractSymbol: o.symbol,
+      side,
       strike: o.strike,
       bid, ask, last, mid,
       volume: o.volume ?? 0,
       openInterest: o.open_interest ?? 0,
       impliedVolatility: o.greeks?.mid_iv ?? o.greeks?.smv_vol ?? 0,
-      inTheMoney: spot > o.strike,
-      pctOTM: spot > 0 ? (o.strike - spot) / spot : 0,
+      inTheMoney: side === "C" ? spot > o.strike : spot < o.strike,
+      // OTM amount, always positive when OTM. Calls: (K-S)/S; puts: (S-K)/S.
+      pctOTM: spot > 0 ? (side === "C" ? (o.strike - spot) / spot : (spot - o.strike) / spot) : 0,
       expiration: expEpoch,
     };
   };
 
-  let calls: OutOption[];
+  let allOpts: OutOption[];
   if (allExpirations) {
-    // Tradier requires one request per expiration. Run them in parallel with bounded concurrency.
     const CONCURRENCY = 8;
     const out: OutOption[] = [];
     for (let i = 0; i < expDates.length; i += CONCURRENCY) {
@@ -99,15 +103,15 @@ async function fetchTradier(symbol: string, dateStr?: string, allExpirations = f
         if (r.status !== "fulfilled") continue;
         const opts = r.value?.options?.option ?? [];
         const arr = Array.isArray(opts) ? opts : [opts];
-        for (const o of arr) if (o.option_type === "call") out.push(mapOpt(o));
+        for (const o of arr) if (o.option_type === "call" || o.option_type === "put") out.push(mapOpt(o));
       }
     }
-    calls = out.sort((a, b) => a.expiration - b.expiration || a.strike - b.strike);
+    allOpts = out.sort((a, b) => a.expiration - b.expiration || a.strike - b.strike);
   } else {
     const chainJson = await tradierFetch("/v1/markets/options/chains", { symbol, expiration: chosen, greeks: "true" });
     const opts = chainJson?.options?.option ?? [];
-    calls = (Array.isArray(opts) ? opts : [opts])
-      .filter((o: any) => o.option_type === "call")
+    allOpts = (Array.isArray(opts) ? opts : [opts])
+      .filter((o: any) => o.option_type === "call" || o.option_type === "put")
       .map(mapOpt);
   }
 
@@ -117,7 +121,8 @@ async function fetchTradier(symbol: string, dateStr?: string, allExpirations = f
     spot,
     expirations: expDates.map(d => Math.floor(new Date(d + "T20:00:00Z").getTime() / 1000)),
     selectedExpiration: Math.floor(new Date(chosen + "T20:00:00Z").getTime() / 1000),
-    calls,
+    calls: allOpts.filter(o => o.side === "C"),
+    puts: allOpts.filter(o => o.side === "P"),
     via: allExpirations ? "tradier-all" : "tradier",
   };
 }
@@ -160,25 +165,26 @@ async function fetchCboe(symbol: string, dateEpoch?: string, allExpirations = fa
   const shortName = d.security_name ?? d.symbol ?? symbol;
   const options: any[] = d.options ?? [];
 
-  // Group calls by expiration epoch
+  // Group all options (calls + puts) by expiration epoch
   const byExp = new Map<number, OutOption[]>();
   for (const o of options) {
     const occ: string = o.option ?? o.symbol;
     const parsed = parseOcc(occ);
-    if (!parsed || parsed.type !== "C") continue;
+    if (!parsed) continue;
     const bid = Number(o.bid ?? 0);
     const ask = Number(o.ask ?? 0);
     const last = Number(o.last_trade_price ?? o.last ?? 0);
     const mid = bid && ask ? (bid + ask) / 2 : last;
     const row: OutOption = {
       contractSymbol: occ,
+      side: parsed.type,
       strike: parsed.strike,
       bid, ask, last, mid,
       volume: Number(o.volume ?? 0),
       openInterest: Number(o.open_interest ?? 0),
       impliedVolatility: Number(o.iv ?? 0),
-      inTheMoney: spot > parsed.strike,
-      pctOTM: spot > 0 ? (parsed.strike - spot) / spot : 0,
+      inTheMoney: parsed.type === "C" ? spot > parsed.strike : spot < parsed.strike,
+      pctOTM: spot > 0 ? (parsed.type === "C" ? (parsed.strike - spot) / spot : (spot - parsed.strike) / spot) : 0,
       expiration: parsed.expiration,
     };
     if (!byExp.has(parsed.expiration)) byExp.set(parsed.expiration, []);
@@ -186,16 +192,17 @@ async function fetchCboe(symbol: string, dateEpoch?: string, allExpirations = fa
   }
 
   const expirations = [...byExp.keys()].sort((a, b) => a - b);
-  if (!expirations.length) throw new Error("cboe: no call options parsed");
+  if (!expirations.length) throw new Error("cboe: no options parsed");
   const chosen = dateEpoch ? Number(dateEpoch) : expirations[0];
-  const calls = allExpirations
+  const all = allExpirations
     ? expirations.flatMap(e => byExp.get(e) ?? []).sort((a, b) => a.expiration - b.expiration || a.strike - b.strike)
     : (byExp.get(chosen) ?? byExp.get(expirations[0])!).sort((a, b) => a.strike - b.strike);
 
   return {
     symbol, shortName, spot, expirations,
     selectedExpiration: chosen,
-    calls,
+    calls: all.filter(o => o.side === "C"),
+    puts: all.filter(o => o.side === "P"),
     via: allExpirations ? "cboe-all" : "cboe",
   };
 }
@@ -241,8 +248,9 @@ async function fetchYahoo(symbol: string, date?: string): Promise<OutChain> {
         if (!result) throw new Error(`${host}${auth ? "+auth" : ""} empty`);
         const spot = result.quote.regularMarketPrice;
         const chain = result.options?.[0];
-        const calls: OutOption[] = (chain?.calls ?? []).map((c: any) => ({
+        const mapY = (c: any, side: "C" | "P"): OutOption => ({
           contractSymbol: c.contractSymbol,
+          side,
           strike: c.strike,
           bid: c.bid, ask: c.ask, last: c.lastPrice,
           mid: c.bid && c.ask ? (c.bid + c.ask) / 2 : c.lastPrice,
@@ -250,16 +258,17 @@ async function fetchYahoo(symbol: string, date?: string): Promise<OutChain> {
           openInterest: c.openInterest ?? 0,
           impliedVolatility: c.impliedVolatility,
           inTheMoney: c.inTheMoney,
-          pctOTM: spot > 0 ? (c.strike - spot) / spot : 0,
+          pctOTM: spot > 0 ? (side === "C" ? (c.strike - spot) / spot : (spot - c.strike) / spot) : 0,
           expiration: c.expiration,
-        }));
+        });
         return {
           symbol,
           shortName: result.quote.shortName ?? symbol,
           spot,
           expirations: result.expirationDates,
           selectedExpiration: chain?.expirationDate ?? result.expirationDates?.[0],
-          calls,
+          calls: (chain?.calls ?? []).map((c: any) => mapY(c, "C")),
+          puts:  (chain?.puts  ?? []).map((c: any) => mapY(c, "P")),
           via: `yahoo-${host}${auth ? "+auth" : ""}`,
         };
       } catch (e: any) {

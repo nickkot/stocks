@@ -1,4 +1,4 @@
-import { bsCall, IvSurface, lookupIv } from "./blackScholes";
+import { bsCall, bsPut, IvSurface, lookupIv } from "./blackScholes";
 
 // Box-Muller standard normal.
 function randn(): number {
@@ -29,6 +29,7 @@ export type SimInput = {
   paths: number;               // monte carlo paths
   targetMultiple: number;      // e.g. 100 for 100x
   ivSurface?: IvSurface;       // optional term-structure-aware IV surface for intermediate marks
+  side?: "C" | "P";            // call (default) or put
 };
 
 export type SimResult = {
@@ -92,17 +93,21 @@ export function simulate(input: SimInput): SimResult {
       const sigmaStep = input.ivSurface
         ? lookupIv(input.ivSurface, T_remain, Math.log(input.strike / levPrice))
         : sigmaForMark;
-      const mark = bsCall(levPrice, input.strike, T_remain, input.riskFreeRate, sigmaStep);
+      const mark = (input.side === "P" ? bsPut : bsCall)(levPrice, input.strike, T_remain, input.riskFreeRate, sigmaStep);
       if (mark > peakOptValue) peakOptValue = mark;
     }
-    const intrinsic = Math.max(0, levPrice - input.strike) * 100 * input.contracts;
+    const intrinsicPerShare = input.side === "P"
+      ? Math.max(0, input.strike - levPrice)
+      : Math.max(0, levPrice - input.strike);
+    const intrinsic = intrinsicPerShare * 100 * input.contracts;
     endingLev[i] = levPrice;
     endingOpt[i] = intrinsic;
     const mult = totalPremium > 0 ? intrinsic / totalPremium : 0;
     multiples[i] = mult;
     const peakMult = input.optionPrice > 0 ? peakOptValue / input.optionPrice : 0;
     peakMultiples[i] = peakMult;
-    if (levPrice > input.strike) itm++;
+    const isItm = input.side === "P" ? levPrice < input.strike : levPrice > input.strike;
+    if (isItm) itm++;
     if (mult >= 2) doubles++;
     if (mult >= 10) tenx++;
     if (mult >= input.targetMultiple) hit++;
@@ -122,7 +127,9 @@ export function simulate(input: SimInput): SimResult {
 
   // Move needed in leveraged ETF for option to be worth targetMultiple of premium at expiry
   const targetIntrinsicPerShare = input.optionPrice * input.targetMultiple;
-  const targetLevPrice = input.strike + targetIntrinsicPerShare;
+  const targetLevPrice = input.side === "P"
+    ? Math.max(0, input.strike - targetIntrinsicPerShare)
+    : input.strike + targetIntrinsicPerShare;
   const leveragedMoveForTarget = targetLevPrice / input.leveragedSpot - 1;
   // Map leveraged move back to a single-shot underlying move (no decay, instantaneous): r_lev ~= L * r_under
   const underlyingMoveForTarget = leveragedMoveForTarget / L;
